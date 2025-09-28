@@ -1,0 +1,37 @@
+# -----------------------------------------------
+# Config for Causal Disentanglement Pre-experiment on NYUv2
+# -----------------------------------------------
+
+# -- Data Parameters --
+data:
+  dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyu_depth_v2_labeled.mat"
+  batch_size: 8
+  num_workers: 4
+  img_size: [224, 224]
+
+# -- Model Parameters --
+model:
+  encoder_name: "vit_b_16"
+  pretrained: True
+  latent_dim_s: 64
+  latent_dim_p: 128
+  z_s_bottleneck_noise: 0.1
+  num_scene_classes: 27 # NYUv2有27个场景类别
+
+# -- Training Parameters --
+training:
+  seed: 42
+  epochs: 100
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  enable_training: True
+
+# -- Loss Weights --
+losses:
+  lambda_seg: 1.0
+  lambda_depth: 1.0
+  lambda_scene: 0.5 # 新增场景分类任务的权重
+  lambda_independence: 0.5
+  alpha_recon_geom: 0.2
+  beta_recon_app: 0.2
