@@ -13,7 +13,7 @@ class CompositeLoss(nn.Module):
         self.scene_loss = nn.CrossEntropyLoss()  # 新增
 
         self.independence_loss = HSIC(normalize=True)
-        self.recon_geom_loss = nn.MSELoss()
+        self.recon_geom_loss = nn.L1Loss()
         self.recon_app_loss = nn.MSELoss()
 
     def forward(self, outputs, targets):

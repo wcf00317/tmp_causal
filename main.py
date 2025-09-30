@@ -3,7 +3,8 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 import os
-
+from data_utils.nyuv2_dataset import NYUv2Dataset
+import h5py
 # --- 必改1: 确认模块/文件名一致性 ---
 # 请确保下面的导入路径与您项目中models/和losses/下的文件名完全一致
 # 例如，如果文件名是 causal_models.py (复数)，则应改为:
@@ -39,10 +40,19 @@ def main(config_path):
     print("\nInitializing dataset...")
     try:
         # 确保我们导入的Dataset类名与文件名中的类名一致
-        from data_utils.nyuv2_dataset import NYUv2Dataset
+
+        print("Pre-loading scene metadata from HDF5 file...")
+        with h5py.File(config['data']['dataset_path'], 'r') as db:
+            scene_type_refs = db['sceneTypes']  # shape is (1, 1449)
+            scene_types_list = []
+
+            for i in range(scene_type_refs.shape[1]):
+                ref = scene_type_refs[0, i]
+                scene_str = "".join(chr(c[0]) for c in db[ref])
+                scene_types_list.append(scene_str)
         full_dataset = NYUv2Dataset(
             mat_file_path=config['data']['dataset_path'],
-            img_size=tuple(config['data']['img_size'])
+            img_size=tuple(config['data']['img_size']),scene_types_list=scene_types_list
         )
 
         # --- 必改7: 保证随机划分的可复现性 ---

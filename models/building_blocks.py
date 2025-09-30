@@ -39,7 +39,7 @@ class ViTEncoder(nn.Module):
         batch_class_token = self.vit.class_token.expand(n, -1, -1)
         x = torch.cat([batch_class_token, x], dim=1)
         x = x + self.vit.encoder.pos_embedding
-        x = self.vit.encoder.encoder(x)
+        x = self.vit.encoder(x)
         patch_tokens = x[:, 1:, :]
         b, _, c = patch_tokens.shape
         patch_tokens = patch_tokens.permute(0, 2, 1)
@@ -56,6 +56,7 @@ class MLP(nn.Module):
 
     def __init__(self, input_dim, output_dim, hidden_dim=256, num_layers=2):
         super().__init__()
+        self.out_features = output_dim
         layers = []
         current_dim = input_dim
         for _ in range(num_layers - 1):
@@ -78,7 +79,7 @@ class FuserAndDecoder(nn.Module):
 
     def __init__(self, encoder_feature_dim, latent_dim_s, latent_dim_p, output_channels):
         super().__init__()
-
+        self.output_channels = output_channels
         total_latent_dim = latent_dim_s + latent_dim_p
 
         # A "fuser" module that combines the spatial features with the latent codes
