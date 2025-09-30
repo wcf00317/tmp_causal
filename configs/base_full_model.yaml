@@ -29,9 +29,9 @@ training:
 
 # -- Loss Weights --
 losses:
-  lambda_seg: 1.0
-  lambda_depth: 1.0
-  lambda_scene: 0.5 # 新增场景分类任务的权重
-  lambda_independence: 0.5
-  alpha_recon_geom: 0.2
-  beta_recon_app: 0.2
+  lambda_seg: 5.0
+  lambda_depth: 0.00001
+  lambda_scene: 0.00001 # 新增场景分类任务的权重
+  lambda_independence: 0.0
+  alpha_recon_geom: 0.0
+  beta_recon_app: 0.0

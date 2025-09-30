@@ -70,58 +70,44 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-# A new, more principled decoder design
-class FuserAndDecoder(nn.Module):
+class SimpleDecoder(nn.Module):
     """
-    A more advanced decoder that takes the original feature map from the encoder
-    and "fuses" it with the learned latent variables before upsampling.
+    一个标准的卷积解码器，加入了BatchNorm2d来稳定梯度流。
     """
 
-    def __init__(self, encoder_feature_dim, latent_dim_s, latent_dim_p, output_channels):
+    def __init__(self, input_channels, output_channels):
         super().__init__()
         self.output_channels = output_channels
-        total_latent_dim = latent_dim_s + latent_dim_p
-
-        # A "fuser" module that combines the spatial features with the latent codes
-        self.fuser = nn.Sequential(
-            # Project latents to have the same channel dim as encoder features
-            nn.Linear(total_latent_dim, encoder_feature_dim),
-            nn.ReLU()
-        )
-
-        # A simple convolutional layer to process the fused features before upsampling
-        self.bottleneck = nn.Conv2d(encoder_feature_dim, 256, kernel_size=1)
 
         self.decoder_net = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # 14x14 -> 28x28
+            # Block 1
+            nn.Conv2d(input_channels, 256, kernel_size=3, padding=1, bias=False),  # 使用BN时，卷积层可以不用偏置
+            nn.BatchNorm2d(256),
             nn.ReLU(True),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  # -> 56x56
+
+            # Block 2: 14x14 -> 28x28
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
             nn.ReLU(True),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),  # -> 112x112
+
+            # Block 3: 28x28 -> 56x56
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
             nn.ReLU(True),
-            nn.ConvTranspose2d(32, output_channels, kernel_size=4, stride=2, padding=1)  # -> 224x224
+
+            # Block 4: 56x56 -> 112x112
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+
+            # Output Layer: 112x112 -> 224x224
+            # 最后一层通常不加BN和ReLU，直接输出logits
+            nn.ConvTranspose2d(32, output_channels, kernel_size=4, stride=2, padding=1)
         )
 
-    def forward(self, feature_map, z_s, z_p):
-        # feature_map: (B, 768, 14, 14)
-        # z_s: (B, latent_dim_s)
-        # z_p: (B, latent_dim_p)
-
-        # Combine latents
-        z_combined = torch.cat([z_s, z_p], dim=1)
-
-        # Fuse latents with the feature map
-        z_fused = self.fuser(z_combined)  # -> (B, 768)
-
-        # Modulate the feature map by adding the fused latent info
-        # We expand z_fused to match the spatial dimensions of the feature map
-        modulated_feature_map = feature_map + z_fused.unsqueeze(-1).unsqueeze(-1)
-
-        # Process and decode
-        x = self.bottleneck(modulated_feature_map)
-        output = self.decoder_net(x)
-
-        return output
+    def forward(self, *feature_maps):
+        combined_features = torch.cat(feature_maps, dim=1)
+        return self.decoder_net(combined_features)
 
 
 class ConvDecoder(nn.Module):
