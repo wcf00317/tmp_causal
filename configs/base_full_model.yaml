@@ -29,11 +29,11 @@ training:
 
 # -- Loss Weights --
 losses:
-    lambda_seg: 5.0        # segmentation 主体权重（如果你确实重视 seg，可 later 增到 2~5）
-    lambda_depth: 1.0      # depth 标准起点
-    lambda_scene: 2.0      # scene classification 起点
-    lambda_independence: 0.05  # independence 一开始不要太大，0.05-0.2 之间试
-    alpha_recon_geom: 0.5  # geom recon 起点
-    beta_recon_app: 0.5    # appearance recon 从 0.5 开始（不要一开始就太大）
-    alpha_recon_geom_aux: 0.25
-    beta_recon_app_aux: 0.25
+    lambda_seg: 3.0
+    lambda_depth: 1.0
+    lambda_scene: 1.0
+    lambda_independence: 0.15   # independence 稍大
+    alpha_recon_geom: 1.0
+    beta_recon_app: 1.0
+    alpha_recon_geom_aux: 0.5
+    beta_recon_app_aux: 0.5

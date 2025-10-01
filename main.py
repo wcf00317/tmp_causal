@@ -11,7 +11,7 @@ import h5py
 # from models.causal_models import CausalMTLModel
 from models.causal_model import CausalMTLModel
 from losses.composite_loss import CompositeLoss
-
+from datetime import datetime
 from engine.trainer import train
 from engine.visualizer import generate_visual_reports
 from utils.general_utils import set_seed
@@ -32,6 +32,13 @@ def main(config_path):
         print(f"❌ Error loading config file: {e}")
         return
 
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
+    run_dir = os.path.join('runs', timestamp)
+    checkpoint_dir = os.path.join(run_dir, 'checkpoints')
+    vis_dir = os.path.join(run_dir, 'visualizations')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(vis_dir, exist_ok=True)
+    print(f"📂 All outputs for this run will be saved in: {run_dir}")
     # 2. 设置计算设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 Using device: {device}")
@@ -104,38 +111,28 @@ def main(config_path):
     # 6. 启动训练流程
     print("\n----- Starting Training -----")
     if config['training'].get('enable_training', True):
-        train(model, train_loader, val_loader, optimizer, criterion, scheduler, config, device)
+        train(model, train_loader, val_loader, optimizer, criterion, scheduler, config, device, checkpoint_dir)
     else:
         print("🏃 Training is disabled in the config. Skipping.")
 
     # 7. 最终可视化与分析
     print("\n----- Running Final Visualizations & Analysis -----")
-    best_checkpoint_path = 'checkpoints/model_best.pth.tar'
+    best_checkpoint_path = os.path.join(checkpoint_dir, 'model_best.pth.tar')
     if os.path.exists(best_checkpoint_path):
         print(f"🔍 Loading best model from {best_checkpoint_path} for visualization...")
-
-        # --- 必改2: 加载checkpoint时使用map_location ---
         checkpoint = torch.load(best_checkpoint_path, map_location=device)
-
         try:
             model.load_state_dict(checkpoint['state_dict'])
             print("✅ Loaded checkpoint state_dict successfully.")
         except RuntimeError as e:
-            # 增加鲁棒性，如果key不完全匹配（例如在多卡和单卡模型间切换），尝试非严格加载
             print(f"⚠️ Warning: state_dict load error: {e}. Trying non-strict load.")
             model.load_state_dict(checkpoint['state_dict'], strict=False)
-
-        # 强烈建议: 加载后显式设置eval模式
         model.eval()
-
-        # --- 必改5: 确保vis_loader能提供至少两个不同batch ---
-        # 我们已在visualizer中修复了采样逻辑，这里确保loader配置合理即可
         vis_loader = DataLoader(val_dataset, batch_size=2, shuffle=True)
-
-        generate_visual_reports(model, vis_loader, device, save_dir="visualizations_final")
+        # --- 修改: 将新创建的 vis_dir 传递给可视化函数 ---
+        generate_visual_reports(model, vis_loader, device, save_dir=vis_dir)
     else:
         print(f"⚠️ Could not find best model checkpoint at '{best_checkpoint_path}'. Skipping final analysis.")
-
     # --- 必改3: 安全地调用close方法 ---
     if hasattr(full_dataset, "close") and callable(full_dataset.close):
         print("Closing dataset handler...")

@@ -54,7 +54,7 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch):
     return avg_train_loss
 
 
-def train(model, train_loader, val_loader, optimizer, criterion, scheduler, config, device):
+def train(model, train_loader, val_loader, optimizer, criterion, scheduler, config, device, checkpoint_dir='checkpoints'):
     best_val_metric = float('inf')
 
     for epoch in range(config['training']['epochs']):
@@ -79,7 +79,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
             'state_dict': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'best_val_metric': best_val_metric,
-        }, is_best)
+        }, is_best, checkpoint_dir=checkpoint_dir)
 
     print("\n----- Training Finished -----")
     print(f"Best model saved with Depth RMSE: {best_val_metric:.4f}")
