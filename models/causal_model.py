@@ -1,42 +1,38 @@
 import torch
 import torch.nn as nn
-from .building_blocks import ViTEncoder, MLP, SimpleDecoder
+from .building_blocks import ViTEncoder, MLP, ResNetDecoderWithDeepSupervision
 
 
 class SegDepthDecoder(nn.Module):
-    def __init__(self, encoder_feature_dim, latent_dim_s, latent_dim_p, output_channels):
+    def __init__(self, input_channels, output_channels):
         super().__init__()
         self.output_channels = output_channels
 
-        # 上采样块
-        self.deconv1 = self._make_deconv_layer(encoder_feature_dim + latent_dim_s + latent_dim_p, 256)
-        self.deconv2 = self._make_deconv_layer(256, 128)
-        self.deconv3 = self._make_deconv_layer(128, 64)
-        self.deconv4 = self._make_deconv_layer(64, 32)
+        # 内部上采样块，使用老师推荐的 interpolate + conv 结构
+        def _make_upsample_layer(in_c, out_c):
+            return nn.Sequential(
+                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(inplace=True)
+            )
+
+        # 上采样路径
+        self.upsample1 = _make_upsample_layer(input_channels, 256)  # 14x14 -> 28x28
+        self.upsample2 = _make_upsample_layer(256, 128)  # 28x28 -> 56x56
+        self.upsample3 = _make_upsample_layer(128, 64)  # 56x56 -> 112x112
+        self.upsample4 = _make_upsample_layer(64, 32)  # 112x112 -> 224x224
 
         # 最终的预测层
         self.final_conv = nn.Conv2d(32, output_channels, kernel_size=3, padding=1)
 
-    def _make_deconv_layer(self, in_channels, out_channels):
-        return nn.Sequential(
-            nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(True)
-        )
-
-    def forward(self, feature_map, z_s_map, z_p_map):
-        # 1. 在解码器的最开始，就将所有信息拼接起来
-        # 这是关键一步：原始的、包含丰富信息的feature_map被直接送入
-        x = torch.cat([feature_map, z_s_map, z_p_map], dim=1)
-
-        # 2. 逐层上采样
-        x = self.deconv1(x)  # 14x14 -> 28x28
-        x = self.deconv2(x)  # 28x28 -> 56x56
-        x = self.deconv3(x)  # 56x56 -> 112x112
-        x = self.deconv4(x)  # 112x112 -> 224x224
-
-        # 3. 生成最终预测
+    def forward(self, x):
+        x = self.upsample1(x)
+        x = self.upsample2(x)
+        x = self.upsample3(x)
+        x = self.upsample4(x)
         return self.final_conv(x)
+
 
 class CausalMTLModel(nn.Module):
     def __init__(self, model_config, data_config):
@@ -61,20 +57,30 @@ class CausalMTLModel(nn.Module):
         # 用于场景分类的全局特征的投影器仍然是MLP
         self.projector_p_scene = MLP(encoder_feature_dim, self.latent_dim_p)
 
+        PROJ_CHANNELS = 256  # 定义一个统一的投影维度
+        self.proj_f = nn.Conv2d(encoder_feature_dim, PROJ_CHANNELS, kernel_size=1)
+        self.proj_z_s = nn.Conv2d(self.latent_dim_s, PROJ_CHANNELS, kernel_size=1)
+        self.proj_z_p_seg = nn.Conv2d(self.latent_dim_p, PROJ_CHANNELS, kernel_size=1)
+        self.proj_z_p_depth = nn.Conv2d(self.latent_dim_p, PROJ_CHANNELS, kernel_size=1)
+
+        # 解码器的输入通道数现在是投影后拼接的维度
+        decoder_input_dim = PROJ_CHANNELS * 3  # feature_map + z_s + z_p
+
         num_seg_classes = 40
         num_scene_classes = model_config['num_scene_classes']
 
-        self.predictor_seg = SegDepthDecoder(encoder_feature_dim, self.latent_dim_s, self.latent_dim_p, num_seg_classes)
-        self.predictor_depth = SegDepthDecoder(encoder_feature_dim, self.latent_dim_s, self.latent_dim_p, 1)
+        self.predictor_seg = SegDepthDecoder(decoder_input_dim, num_seg_classes)
+        self.predictor_depth = SegDepthDecoder(decoder_input_dim, 1)
 
         # 场景分类预测器保持不变
         predictor_scene_input_dim = encoder_feature_dim + self.latent_dim_s + self.latent_dim_p
         self.predictor_scene = MLP(predictor_scene_input_dim, num_scene_classes)
 
-
         from .building_blocks import ConvDecoder as VisualizationDecoder
-        self.decoder_geom = VisualizationDecoder(self.latent_dim_s, 1, data_config['img_size'])
-        self.decoder_app = VisualizationDecoder(self.latent_dim_p, 2, data_config['img_size'])
+        # self.decoder_geom = VisualizationDecoder(self.latent_dim_s, 1, data_config['img_size'])
+        # self.decoder_app = VisualizationDecoder(self.latent_dim_p, 2, data_config['img_size'])
+        self.decoder_geom = ResNetDecoderWithDeepSupervision(self.latent_dim_s, 1, tuple(data_config['img_size']))
+        self.decoder_app = ResNetDecoderWithDeepSupervision(self.latent_dim_p, 2, tuple(data_config['img_size']))
 
     def forward(self, x):
         feature_map = self.encoder(x)
@@ -90,22 +96,25 @@ class CausalMTLModel(nn.Module):
         z_p_depth = z_p_depth_map.mean(dim=[2, 3])  # Shape: [B, 128]
         z_p_scene = self.projector_p_scene(h)  # Shape: [B, 128]
 
-        if self.training and self.config['z_s_bottleneck_noise'] > 0:
-            noise = torch.randn_like(z_s) * self.config['z_s_bottleneck_noise']
-            z_s = z_s + noise
+        # 1. 将不同的特征图投影到统一维度
+        f_proj = self.proj_f(feature_map)
+        zs_proj = self.proj_z_s(z_s_map)
+        zp_seg_proj = self.proj_z_p_seg(z_p_seg_map)
+        zp_depth_proj = self.proj_z_p_depth(z_p_depth_map)
 
-        # 4. 将保留了空间信息的特征图送入解码器
-        pred_seg = self.predictor_seg(feature_map, z_s_map, z_p_seg_map)
-        pred_depth = self.predictor_depth(feature_map, z_s_map, z_p_depth_map)
+        # 2. 拼接投影后的特征图，送入解码器
+        pred_seg = self.predictor_seg(torch.cat([f_proj, zs_proj, zp_seg_proj], dim=1))
+        pred_depth = self.predictor_depth(torch.cat([f_proj, zs_proj, zp_depth_proj], dim=1))
 
         # 5. 场景分类使用全局向量
         scene_predictor_input = torch.cat([h, z_s, z_p_scene], dim=1)
         pred_scene = self.predictor_scene(scene_predictor_input)
 
         # 6. 用于可视化的解码器使用全局向量
-        recon_geom = self.decoder_geom(z_s)
-        recon_app = self.decoder_app(z_p_seg)
-
+        # recon_geom = self.decoder_geom(z_s)
+        # recon_app = self.decoder_app(z_p_seg)
+        recon_geom_final, recon_geom_aux = self.decoder_geom(z_s)
+        recon_app_final, recon_app_aux = self.decoder_app(z_p_seg)
 
         outputs = {
             'z_s': z_s,
@@ -115,8 +124,12 @@ class CausalMTLModel(nn.Module):
             'pred_seg': pred_seg,
             'pred_depth': pred_depth,
             'pred_scene': pred_scene,  # 新增
-            'recon_geom': recon_geom,
-            'recon_app': recon_app,
+            # 'recon_geom': recon_geom,
+            # 'recon_app': recon_app,
+            'recon_geom': recon_geom_final,      # 主重构
+            'recon_app': recon_app_final,  # 主重构
+            'recon_geom_aux': recon_geom_aux,  # 辅助重构
+            'recon_app_aux': recon_app_aux  # 辅助重构
         }
 
         return outputs

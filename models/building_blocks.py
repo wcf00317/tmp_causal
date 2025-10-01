@@ -112,36 +112,117 @@ class SimpleDecoder(nn.Module):
 
 class ConvDecoder(nn.Module):
     """
-    A simple Convolutional Decoder to reconstruct maps from a non-spatial latent vector.
-    This is specifically used for the visualization part of the pre-experiment.
+    一个增强版的卷积解码器，使用InstanceNorm2d来保证在小批次下的训练稳定性。
     """
-
     def __init__(self, latent_dim, output_channels, target_size=(224, 224)):
         super().__init__()
         self.target_size = target_size
-        self.latent_dim = latent_dim
-        self.output_channels = output_channels
-
-        # This starting grid size should align with the ViT patch grid (e.g., 14x14)
         start_size = target_size[0] // 16
+
         self.upsample_in = nn.Sequential(
-            nn.Linear(latent_dim, 256 * start_size * start_size),
+            nn.Linear(latent_dim, 512 * start_size * start_size),
             nn.ReLU(True)
         )
         self.start_size = start_size
 
         self.net = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # 14x14 -> 28x28
+            # 14x14 -> 28x28
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.InstanceNorm2d(256), # <-- 使用 InstanceNorm2d 替换 BatchNorm2d
             nn.ReLU(True),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  # -> 56x56
+            # 28x28 -> 56x56
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.InstanceNorm2d(128), # <-- 使用 InstanceNorm2d 替换 BatchNorm2d
             nn.ReLU(True),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),  # -> 112x112
+            # 56x56 -> 112x112
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.InstanceNorm2d(64),  # <-- 使用 InstanceNorm2d 替换 BatchNorm2d
             nn.ReLU(True),
-            nn.ConvTranspose2d(32, output_channels, kernel_size=4, stride=2, padding=1)  # -> 224x224
+            # 112x112 -> 224x224 (最后一层不加归一化和ReLU)
+            nn.ConvTranspose2d(64, output_channels, kernel_size=4, stride=2, padding=1)
         )
 
     def forward(self, x):
         x = self.upsample_in(x)
-        x = x.view(-1, 256, self.start_size, self.start_size)  # Reshape to (B, 256, 14, 14)
+        x = x.view(-1, 512, self.start_size, self.start_size)
         x = self.net(x)
         return x
+
+class ResidualBlock(nn.Module):
+    """
+    一个标准的残差上采样块，包含快捷连接。
+    它首先上采样，然后通过两个卷积层，最后将输入添加到输出上。
+    """
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        # 快捷连接路径：需要上采样并调整通道数以匹配主路径输出
+        self.shortcut = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+        )
+        # 主路径
+        self.main_path = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.InstanceNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.InstanceNorm2d(out_channels)
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        shortcut = self.shortcut(x)
+        main = self.main_path(x)
+        return self.relu(shortcut + main)
+
+
+class ResNetDecoderWithDeepSupervision(nn.Module):
+    """
+    使用残差块构建的解码器，并集成了深度监督功能。
+    """
+    def __init__(self, latent_dim, output_channels, target_size=(224, 224)):
+        super().__init__()
+        self.target_size = target_size
+        start_size = target_size[0] // 16  # 224 / 16 = 14
+
+        # 初始层：将扁平的latent vector转换为14x14的特征图
+        self.upsample_in = nn.Sequential(
+            nn.Linear(latent_dim, 512 * start_size * start_size),
+            nn.ReLU(True)
+        )
+        self.start_size = start_size
+
+        # 上采样模块 (ResNet blocks)
+        self.res_block1 = ResidualBlock(512, 256)  # 14x14 -> 28x28
+        self.res_block2 = ResidualBlock(256, 128)  # 28x28 -> 56x56
+        self.res_block3 = ResidualBlock(128, 64)   # 56x56 -> 112x112
+
+        # --- 深度监督分支 ---
+        # 从 56x56 的特征图 (self.res_block2的输出) 创建一个辅助预测
+        self.aux_head = nn.Conv2d(128, output_channels, kernel_size=3, padding=1)
+
+        # 主输出路径
+        self.final_upsample = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False), # 112x112 -> 224x224
+            nn.Conv2d(64, output_channels, kernel_size=3, padding=1)
+        )
+
+    def forward(self, x):
+        # 1. 初始上采样
+        x = self.upsample_in(x)
+        x = x.view(-1, 512, self.start_size, self.start_size)
+
+        # 2. 通过残差块
+        x = self.res_block1(x)
+        x_56 = self.res_block2(x) # <-- 在这里截取中间特征 (56x56)
+
+        # 3. 计算辅助输出
+        out_aux = self.aux_head(x_56)
+
+        # 4. 继续主路径
+        x_final = self.res_block3(x_56)
+        out_final = self.final_upsample(x_final)
+
+        # 5. 返回主输出和辅助输出
+        return out_final, out_aux

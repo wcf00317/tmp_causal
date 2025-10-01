@@ -54,19 +54,13 @@ def main(config_path):
             mat_file_path=config['data']['dataset_path'],
             img_size=tuple(config['data']['img_size']),scene_types_list=scene_types_list
         )
-        OVERFIT_SUBSET_SIZE = 20
-        indices = list(range(OVERFIT_SUBSET_SIZE))
-        overfit_dataset = Subset(full_dataset, indices)
 
-        # 使用这个小数据集进行训练和验证
-        train_dataset = overfit_dataset
-        val_dataset = overfit_dataset
         # --- 必改7: 保证随机划分的可复现性 ---
-        # g = torch.Generator()
-        # g.manual_seed(config['training']['seed'])
-        # train_size = int(0.8 * len(full_dataset))
-        # val_size = len(full_dataset) - train_size
-        # train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=g)
+        g = torch.Generator()
+        g.manual_seed(config['training']['seed'])
+        train_size = int(0.8 * len(full_dataset))
+        val_size = len(full_dataset) - train_size
+        train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=g)
 
         # --- 必改4: 根据设备情况设置pin_memory ---
         pin_memory = config['data'].get('pin_memory', torch.cuda.is_available())

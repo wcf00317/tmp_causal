@@ -10,7 +10,7 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch):
     model.train()
     total_train_loss = 0.0
     pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Training]", leave=False)
-    _has_printed_grad_debug = False
+    #_has_printed_grad_debug = False
     for batch in pbar:
         rgb = batch['rgb'].to(device)
         targets_on_device = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
@@ -32,17 +32,17 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch):
 
         total_loss.backward()
 
-        if not _has_printed_grad_debug and epoch == 0:
-            print("\n--- [ONE-TIME DEBUG] Gradient Check ---")
-            for name, p in model.named_parameters():
-                # 我们只关心和分割任务直接相关的部分
-                if 'predictor_seg' in name or 'projector_s' in name or 'projector_p_seg' in name:
-                    is_grad_none = p.grad is None
-                    grad_norm = "N/A" if is_grad_none else p.grad.norm().item()
-                    print(
-                        f"{name:<50} requires_grad={p.requires_grad}, grad_is_None={is_grad_none}, grad_norm={grad_norm}")
-            print("--- End of Gradient Check ---\n")
-            _has_printed_grad_debug = True
+        # if not _has_printed_grad_debug and epoch == 0:
+        #     print("\n--- [ONE-TIME DEBUG] Gradient Check ---")
+        #     for name, p in model.named_parameters():
+        #         # 我们只关心和分割任务直接相关的部分
+        #         if 'predictor_seg' in name or 'projector_s' in name or 'projector_p_seg' in name:
+        #             is_grad_none = p.grad is None
+        #             grad_norm = "N/A" if is_grad_none else p.grad.norm().item()
+        #             print(
+        #                 f"{name:<50} requires_grad={p.requires_grad}, grad_is_None={is_grad_none}, grad_norm={grad_norm}")
+        #     print("--- End of Gradient Check ---\n")
+        #     _has_printed_grad_debug = True
 
         optimizer.step()
 

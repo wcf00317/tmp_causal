@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from .hsic import HSIC
-
+import torch.nn.functional as F
 
 class CompositeLoss(nn.Module):
     def __init__(self, loss_weights):
@@ -45,16 +45,36 @@ class CompositeLoss(nn.Module):
 
         # --- 3. 重构损失 (保持不变) ---
         l_recon_g = self.recon_geom_loss(outputs['recon_geom'], targets['depth'])
-        if 'appearance_target' not in targets:
-            raise KeyError("数据管道未提供'appearance_target'，无法计算外观重构损失。")
         l_recon_a = self.recon_app_loss(outputs['recon_app'], targets['appearance_target'])
         loss_dict.update({'recon_geom_loss': l_recon_g, 'recon_app_loss': l_recon_a})
+
+        recon_geom_aux_list = outputs['recon_geom_aux']
+        recon_app_aux_list = outputs['recon_app_aux']
+
+        l_recon_g_aux_total, l_recon_a_aux_total = 0.0, 0.0
+        num_aux = len(recon_geom_aux_list)
+
+        for recon_geom_aux, recon_app_aux in zip(recon_geom_aux_list, recon_app_aux_list):
+            aux_size = recon_geom_aux.shape[2:]
+            target_depth_aux = F.interpolate(targets['depth'], size=aux_size, mode='bilinear', align_corners=False)
+            target_app_aux = F.interpolate(targets['appearance_target'], size=aux_size, mode='bilinear',
+                                           align_corners=False)
+
+            l_recon_g_aux_total += self.recon_geom_loss(recon_geom_aux, target_depth_aux)
+            l_recon_a_aux_total += self.recon_app_loss(recon_app_aux, target_app_aux)
+
+        # 取平均 (也可以直接相加，看你实验需求)
+        l_recon_g_aux = l_recon_g_aux_total / num_aux
+        l_recon_a_aux = l_recon_a_aux_total / num_aux
+
+        loss_dict.update({'recon_geom_aux_loss': l_recon_g_aux, 'recon_app_aux_loss': l_recon_a_aux})
 
         # --- 4. 总损失 ---
         total_loss = (l_task +
                       self.weights.get('lambda_independence', 0) * l_ind +
                       self.weights.get('alpha_recon_geom', 0) * l_recon_g +
-                      self.weights.get('beta_recon_app', 0) * l_recon_a)
-
+                      self.weights.get('beta_recon_app', 0) * l_recon_a +
+                      self.weights.get('alpha_recon_geom_aux', 0) * l_recon_g_aux +
+                      self.weights.get('beta_recon_app_aux', 0) * l_recon_a_aux)
         loss_dict['total_loss'] = total_loss
         return total_loss, loss_dict
