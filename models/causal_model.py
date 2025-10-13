@@ -75,12 +75,15 @@ class CausalMTLModel(nn.Module):
         # 场景分类预测器保持不变
         predictor_scene_input_dim = encoder_feature_dim + self.latent_dim_s + self.latent_dim_p
         self.predictor_scene = MLP(predictor_scene_input_dim, num_scene_classes)
+        self.decoder_zp_depth = SegDepthDecoder(self.latent_dim_p, 1)
 
         from .building_blocks import ConvDecoder as VisualizationDecoder
         # self.decoder_geom = VisualizationDecoder(self.latent_dim_s, 1, data_config['img_size'])
         # self.decoder_app = VisualizationDecoder(self.latent_dim_p, 2, data_config['img_size'])
         self.decoder_geom = ResNetDecoderWithDeepSupervision(self.latent_dim_s, 1, tuple(data_config['img_size']))
-        self.decoder_app = ResNetDecoderWithDeepSupervision(self.latent_dim_p, 2, tuple(data_config['img_size']))
+        #self.decoder_app = ResNetDecoderWithDeepSupervision(self.latent_dim_p, 2, tuple(data_config['img_size']))
+        self.decoder_app = ResNetDecoderWithDeepSupervision(self.latent_dim_p, 3, tuple(data_config['img_size']))
+        self.final_app_activation = nn.Sigmoid()
 
     def forward(self, x):
         feature_map = self.encoder(x)
@@ -110,11 +113,16 @@ class CausalMTLModel(nn.Module):
         scene_predictor_input = torch.cat([h, z_s, z_p_scene], dim=1)
         pred_scene = self.predictor_scene(scene_predictor_input)
 
+        pred_depth_from_zp = self.decoder_zp_depth(z_p_depth_map)
+
         # 6. 用于可视化的解码器使用全局向量
         # recon_geom = self.decoder_geom(z_s)
         # recon_app = self.decoder_app(z_p_seg)
-        recon_geom_final, recon_geom_aux = self.decoder_geom(z_s)
-        recon_app_final, recon_app_aux = self.decoder_app(z_p_seg)
+        recon_geom_final, recon_geom_aux = self.decoder_geom(z_s_map)
+        recon_app_final_logits, recon_app_aux_logits = self.decoder_app(z_p_seg_map)
+
+        recon_app_final = self.final_app_activation(recon_app_final_logits)
+        recon_app_aux = self.final_app_activation(recon_app_aux_logits)
 
         outputs = {
             'z_s': z_s,
@@ -124,12 +132,16 @@ class CausalMTLModel(nn.Module):
             'pred_seg': pred_seg,
             'pred_depth': pred_depth,
             'pred_scene': pred_scene,  # 新增
+            'pred_depth_from_zp': pred_depth_from_zp,
             # 'recon_geom': recon_geom,
             # 'recon_app': recon_app,
             'recon_geom': recon_geom_final,      # 主重构
             'recon_app': recon_app_final,  # 主重构
             'recon_geom_aux': recon_geom_aux,  # 辅助重构
-            'recon_app_aux': recon_app_aux  # 辅助重构
+            'recon_app_aux': recon_app_aux,  # 辅助重构
+
+            'z_s_map': z_s_map,
+            'z_p_seg_map': z_p_seg_map
         }
 
         return outputs

@@ -102,7 +102,7 @@ def main(config_path):
         optimizer = optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
 
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
-    criterion = CompositeLoss(loss_weights=config['losses'])
+    criterion = CompositeLoss(loss_weights=config['losses']).to(device)
     print("⚙️ Model, optimizer, scheduler, and loss function are ready.")
     # --- 必改6: 需确认CompositeLoss的返回接口与trainer兼容 ---
     # 我们已在上一版中统一 CompositeLoss 返回 (total_loss, loss_dict)，
@@ -130,7 +130,7 @@ def main(config_path):
         model.eval()
         vis_loader = DataLoader(val_dataset, batch_size=2, shuffle=True)
         # --- 修改: 将新创建的 vis_dir 传递给可视化函数 ---
-        generate_visual_reports(model, vis_loader, device, save_dir=vis_dir)
+        generate_visual_reports(model, vis_loader, device, save_dir=vis_dir,num_reports=3)
     else:
         print(f"⚠️ Could not find best model checkpoint at '{best_checkpoint_path}'. Skipping final analysis.")
     # --- 必改3: 安全地调用close方法 ---

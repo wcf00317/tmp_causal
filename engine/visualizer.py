@@ -86,33 +86,33 @@ def _visualize_microscope(model, batch, device, save_path, scene_class_map):
     axes[3].imshow(recon_app_rgb);
     axes[3].set_title("Model's Understanding:\nAppearance from $z_{p,seg}$", fontsize=16)
     for ax in axes.flat: ax.axis('off')
+    plt.tight_layout(rect=[0, 0.03, 1, 0.93])
     plt.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
-
 
 def _visualize_mixer(model, batch_a, batch_b, device, save_path, scene_class_map):
     rgb_a = batch_a['rgb'][0].unsqueeze(0).to(device);
     out_a = model(rgb_a);
-    z_s_a, z_p_a = out_a['z_s'], out_a['z_p_seg'];
+    z_s_a_map, z_p_a_map = out_a['z_s_map'], out_a['z_p_seg_map']
     gt_scene_a = scene_class_map[batch_a['scene_type'][0].item()]
     rgb_b = batch_b['rgb'][0].unsqueeze(0).to(device);
     out_b = model(rgb_b);
-    z_s_b, z_p_b = out_b['z_s'], out_b['z_p_seg'];
+    z_s_b_map, z_p_b_map = out_b['z_s_map'], out_b['z_p_seg_map'];
     gt_scene_b = scene_class_map[batch_b['scene_type'][0].item()]
     img_size = tuple(rgb_a.shape[2:])
 
-    def create_hybrid(z_s, z_p):
-        # --- 核心修复 2: 调用解码器后，只取第一个返回值 ---
-        geom_final, _ = model.decoder_geom(z_s)
-        app_final, _ = model.decoder_app(z_p)
+    def create_hybrid(z_s_map, z_p_map):
+        # --- 调用解码器时，传入正确的 _map 变量 ---
+        geom_final, _ = model.decoder_geom(z_s_map)
+        app_final, _ = model.decoder_app(z_p_map)
         geom = geom_final.squeeze()
         app = lab_channels_to_rgb(app_final.squeeze(), img_size)
         return fuse_geom_and_app(geom, app)
 
-    hybrid_A_A = create_hybrid(z_s_a, z_p_a);
-    hybrid_A_B = create_hybrid(z_s_a, z_p_b);
-    hybrid_B_A = create_hybrid(z_s_b, z_p_a);
-    hybrid_B_B = create_hybrid(z_s_b, z_p_b)
+    hybrid_A_A = create_hybrid(z_s_a_map, z_p_a_map);
+    hybrid_A_B = create_hybrid(z_s_a_map, z_p_b_map);
+    hybrid_B_A = create_hybrid(z_s_b_map, z_p_a_map);
+    hybrid_B_B = create_hybrid(z_s_b_map, z_p_b_map)
     fig, axes = plt.subplots(2, 2, figsize=(12, 12), gridspec_kw={'wspace': 0.05, 'hspace': 0.25})
     # ... (绘图的其余部分保持不变) ...
     fig.suptitle("Visualization Report 2: The Causal Mixer", fontsize=22, y=0.97)
@@ -124,21 +124,74 @@ def _visualize_mixer(model, batch_a, batch_b, device, save_path, scene_class_map
     axes[1, 0].set_title(f"Hybrid: Geom B + App A", fontsize=14)
     axes[1, 1].imshow(hybrid_B_B);
     axes[1, 1].set_title(f"Reconstructed Scene B\n(GT Scene: '{gt_scene_b}')", fontsize=14)
-    pad = 5
-    axes[0, 0].annotate('Geometry from A', xy=(0, 0.5), xytext=(-axes[0, 0].yaxis.labelpad - pad, 0),
-                        xycoords=axes[0, 0].yaxis.label, textcoords='offset points', size='large', ha='right',
-                        va='center', rotation=90)
-    axes[1, 0].annotate('Geometry from B', xy=(0, 0.5), xytext=(-axes[1, 0].yaxis.labelpad - pad, 0),
-                        xycoords=axes[1, 0].yaxis.label, textcoords='offset points', size='large', ha='right',
-                        va='center', rotation=90)
-    axes[0, 0].annotate('Appearance from A', xy=(0.5, 1), xytext=(0, pad), xycoords='axes fraction',
-                        textcoords='offset points', size='large', ha='center', va='baseline')
-    axes[0, 1].annotate('Appearance from B', xy=(0.5, 1), xytext=(0, pad), xycoords='axes fraction',
-                        textcoords='offset points', size='large', ha='center', va='baseline')
     for ax in axes.flat: ax.set_xticks([]); ax.set_yticks([])
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
+
+def _visualize_depth_task(model, batch, device, save_path):
+    """
+    生成一个独立的、专注于深度任务和 z_p_depth 解耦分析的可视化报告。
+    """
+    model.eval()
+    idx = 0  # 仅可视化批次中的第一张图
+
+    rgb_tensor = batch['rgb'][idx].unsqueeze(0).to(device)
+    with torch.no_grad():
+        outputs = model(rgb_tensor)
+
+    # --- 准备绘图所需的数据 ---
+    input_rgb = denormalize_image(batch['rgb'][idx])
+    gt_depth = batch['depth'][idx].squeeze().cpu().numpy()
+
+    # 模型主干路的最终深度预测
+    pred_depth_main = outputs['pred_depth'][0].squeeze().cpu().numpy()
+
+    # 仅由 z_p_depth 解码出的深度图
+    pred_depth_zp = outputs['pred_depth_from_zp'][0].squeeze().cpu().numpy()
+
+    # 计算预测误差图
+    error_map = np.abs(pred_depth_main - gt_depth)
+
+    # --- 开始绘图 ---
+    fig, axes = plt.subplots(1, 5, figsize=(30, 6))
+    fig.suptitle("Depth Task & $z_{p,depth}$ Decoupling Analysis", fontsize=22)
+
+    # 使用百分位数来稳健地统一所有深度图的颜色范围
+    vmin, vmax = np.percentile(gt_depth, [2, 98])
+
+    # 图 1: 输入 RGB
+    axes[0].imshow(input_rgb)
+    axes[0].set_title("Input RGB", fontsize=16)
+
+    # 图 2: 真实深度
+    axes[1].imshow(gt_depth, cmap='plasma', vmin=vmin, vmax=vmax)
+    axes[1].set_title("Ground Truth Depth", fontsize=16)
+
+    # 图 3: 主路预测深度
+    axes[2].imshow(pred_depth_main, cmap='plasma', vmin=vmin, vmax=vmax)
+    axes[2].set_title("Main Predicted Depth", fontsize=16)
+
+    # 图 4: 从 z_p_depth 解码的深度
+    im_zp = axes[3].imshow(pred_depth_zp, cmap='plasma', vmin=vmin, vmax=vmax)
+    axes[3].set_title("Depth from $z_{p,depth}$ only", fontsize=16)
+
+    # 图 5: 预测误差
+    im_err = axes[4].imshow(error_map, cmap='hot')
+    axes[4].set_title("Prediction Error", fontsize=16)
+
+    # 美化图像
+    for ax in axes.flat:
+        ax.axis('off')
+
+    fig.colorbar(im_zp, ax=axes[3], fraction=0.046, pad=0.04)
+    fig.colorbar(im_err, ax=axes[4], fraction=0.046, pad=0.04)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.93])
+    plt.savefig(save_path, bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    print(f"  -> 已保存深度分析可视化报告: {save_path}")
 @torch.no_grad()
 def generate_visual_reports(model, data_loader, device, save_dir="visualizations_final", num_reports=3):
     """
@@ -167,11 +220,17 @@ def generate_visual_reports(model, data_loader, device, save_dir="visualizations
 
         print(f"--- Generating Report Set {i + 1}/{num_reports} ---")
 
-        # 为每个报告生成唯一的文件名
+        # 原有的可视化文件路径
         microscope_path = os.path.join(save_dir, f"report_1_microscope_{i + 1}.png")
         mixer_path = os.path.join(save_dir, f"report_2_mixer_{i + 1}.png")
 
+        # 为新的深度分析报告定义文件路径
+        depth_analysis_path = os.path.join(save_dir, f"report_3_depth_analysis_{i + 1}.png")
+
         _visualize_microscope(model, sample_a, device, microscope_path, scene_class_map)
         _visualize_mixer(model, sample_a, sample_b, device, mixer_path, scene_class_map)
+
+        # 增加对新函数的调用，使用 sample_a 进行分析
+        _visualize_depth_task(model, sample_a, device, depth_analysis_path)
 
     print(f"✅ Final visualization reports saved to '{save_dir}'.")

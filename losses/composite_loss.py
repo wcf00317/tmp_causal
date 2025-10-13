@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from .hsic import HSIC
 import torch.nn.functional as F
+from metrics.lpips import LPIPSMetric
 
 class CompositeLoss(nn.Module):
     def __init__(self, loss_weights):
@@ -14,7 +15,9 @@ class CompositeLoss(nn.Module):
 
         self.independence_loss = HSIC(normalize=True)
         self.recon_geom_loss = nn.L1Loss()
-        self.recon_app_loss = nn.MSELoss()
+        #self.recon_app_loss = nn.MSELoss()
+        self.recon_app_loss_lpips = LPIPSMetric(net='vgg')  # LPIPS部分
+        self.recon_app_loss_l1 = nn.L1Loss()  # 新增L1部分
 
     def forward(self, outputs, targets):
         loss_dict = {}
@@ -46,25 +49,31 @@ class CompositeLoss(nn.Module):
         # --- 3. Reconstruction Loss (Main and Auxiliary) ---
         # Main reconstruction loss
         l_recon_g = self.recon_geom_loss(outputs['recon_geom'], targets['depth'])
-        l_recon_a = self.recon_app_loss(outputs['recon_app'], targets['appearance_target'])
+        #l_recon_a = self.recon_app_loss(outputs['recon_app'], targets['appearance_target'])
+        l_recon_a_lpips = self.recon_app_loss_lpips(outputs['recon_app'], targets['appearance_target'])
+        l_recon_a_l1 = self.recon_app_loss_l1(outputs['recon_app'], targets['appearance_target'])
+
+        # 混合损失
+        l_recon_a = l_recon_a_lpips + self.weights.get('lambda_l1_recon', 1.0) * l_recon_a_l1
         loss_dict.update({'recon_geom_loss': l_recon_g, 'recon_app_loss': l_recon_a})
 
         # --- START: CORRECTED AUXILIARY LOSS CALCULATION ---
         recon_geom_aux = outputs['recon_geom_aux']
         recon_app_aux = outputs['recon_app_aux']
 
-        # Get the spatial size (H, W) from the 4D auxiliary output tensor
-        aux_size = recon_geom_aux.shape[2:]
+        aux_size_g = recon_geom_aux.shape[2:]
+        aux_size_a = recon_app_aux.shape[2:]
 
-        # Downsample the ground truth targets to match the auxiliary output size
-        target_depth_aux = F.interpolate(targets['depth'], size=aux_size, mode='bilinear', align_corners=False)
-        target_app_aux = F.interpolate(targets['appearance_target'], size=aux_size, mode='bilinear',
+        target_depth_aux = F.interpolate(targets['depth'], size=aux_size_g, mode='bilinear', align_corners=False)
+        target_app_aux = F.interpolate(targets['appearance_target'], size=aux_size_a, mode='bilinear',
                                        align_corners=False)
 
-        # Calculate the auxiliary losses directly
         l_recon_g_aux = self.recon_geom_loss(recon_geom_aux, target_depth_aux)
-        l_recon_a_aux = self.recon_app_loss(recon_app_aux, target_app_aux)
-        # --- END: CORRECTED AUXILIARY LOSS CALCULATION ---
+
+        # 让辅助外观损失也使用混合模式
+        l_recon_a_lpips_aux = self.recon_app_loss_lpips(recon_app_aux, target_app_aux)
+        l_recon_a_l1_aux = self.recon_app_loss_l1(recon_app_aux, target_app_aux)
+        l_recon_a_aux = l_recon_a_lpips_aux + self.weights.get('lambda_l1_recon', 1.0) * l_recon_a_l1_aux
 
         loss_dict.update({'recon_geom_aux_loss': l_recon_g_aux, 'recon_app_aux_loss': l_recon_a_aux})
 
