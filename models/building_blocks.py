@@ -8,12 +8,12 @@ import torchvision.models as models
 from torchvision.models.vision_transformer import VisionTransformer
 
 
-# ViTEncoder remains the same as above, correctly extracting the 14x14 grid
 class ViTEncoder(nn.Module):
-    # ... (Code from above, no changes needed here)
     """
     A wrapper for the Vision Transformer to extract patch token features.
-    This is the proper way to use ViT for dense prediction tasks.
+    严格工程版：
+    1. 根据 img_size (224/384) 自动匹配最佳预训练权重。
+    2. 如果输入尺寸不匹配，直接抛出 AssertionError（由 torchvision 内部机制保证）。
     """
 
     def __init__(self, name="vit_b_16", pretrained=True, img_size=224, patch_size=16):
@@ -22,11 +22,24 @@ class ViTEncoder(nn.Module):
         self.patch_size = patch_size
         self.grid_size = img_size // patch_size
 
-        # Load the pretrained ViT model
         if name == "vit_b_16":
-            weights = models.ViT_B_16_Weights.DEFAULT if pretrained else None
+            weights = None
+            if pretrained:
+                if img_size == 384:
+                    # 您的目标：384x384 输入，使用 SWAG 高分权重
+                    weights = models.ViT_B_16_Weights.IMAGENET1K_SWAG_E2E_V1
+                    print(f"✅ [ViTEncoder] Using 384x384 pretrained weights (SWAG_E2E_V1).")
+                elif img_size == 224:
+                    # 兼容默认情况
+                    weights = models.ViT_B_16_Weights.DEFAULT
+                    print(f"✅ [ViTEncoder] Using 224x224 pretrained weights (DEFAULT).")
+                else:
+                    # 如果配置写了 480 或其他值，直接在初始化阶段报错，避免跑起来才发现不对
+                    raise ValueError(f"For pretrained ViT, img_size must be 224 or 384. Got {img_size}.")
+
+            # 初始化模型，严格绑定 image_size
             self.vit: VisionTransformer = models.vit_b_16(weights=weights, image_size=img_size)
-            self.feature_dim = 768  # Output feature dimension for ViT-B
+            self.feature_dim = 768
         else:
             raise ValueError(f"Encoder '{name}' not supported.")
 
@@ -34,19 +47,27 @@ class ViTEncoder(nn.Module):
         self.vit.heads = nn.Identity()
 
     def forward(self, x):
+        # 1. 预处理
+        # 直接调用 torchvision 内部函数。
+        # 如果输入 x 的尺寸不是 self.img_size (例如 384)，这里会直接报 AssertionError!
         x = self.vit._process_input(x)
+
+        # 2. 拼接 Class Token
         n = x.shape[0]
         batch_class_token = self.vit.class_token.expand(n, -1, -1)
         x = torch.cat([batch_class_token, x], dim=1)
-        x = x + self.vit.encoder.pos_embedding
+
+        # 3. 通过 Encoder
+        # 注意：torchvision 的 encoder 内部会自动加上 pos_embedding。
+        # 您之前的代码可能手动加了一次，这里去掉手动加的操作，防止由双重加和导致的潜在 bug。
         x = self.vit.encoder(x)
+
+        # 4. 整理输出 [B, 768, H/16, W/16]
         patch_tokens = x[:, 1:, :]
         b, _, c = patch_tokens.shape
         patch_tokens = patch_tokens.permute(0, 2, 1)
         patch_tokens = patch_tokens.view(b, c, self.grid_size, self.grid_size)
         return patch_tokens
-
-
 # MLP remains the same
 class MLP(nn.Module):
     # ... (Code from above, no changes needed here)

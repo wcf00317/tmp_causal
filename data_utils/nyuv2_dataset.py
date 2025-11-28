@@ -74,20 +74,17 @@ class NYUv2Dataset(Dataset):
         # --- 图像预处理 ---
         rgb_resized = resize(rgb_image, self.img_size, anti_aliasing=True, preserve_range=True).astype(np.uint8)
 
-        depth_resized = resize(depth_map, self.img_size, anti_aliasing=True).astype(np.float32)
+        #depth_resized = resize(depth_map, self.img_size, anti_aliasing=True).astype(np.float32)
+        depth_resized = resize(depth_map, self.img_size, order=0, preserve_range=True, anti_aliasing=False).astype(
+            np.float32)
 
         seg_mask_resized = resize(seg_mask_remapped, self.img_size, order=0, preserve_range=True,
                                   anti_aliasing=False).astype(np.int64)
+
+
 
         # --- 为重构任务计算 appearance target ---
         # 根据项目配置，此项为必需，因此予以保留
-        # lab_image = rgb2lab(rgb_resized)
-        # lab_ab_channels = lab_image[:, :, 1:]
-        rgb_resized = resize(rgb_image, self.img_size, anti_aliasing=True, preserve_range=True).astype(np.uint8)
-        depth_resized = resize(depth_map, self.img_size, anti_aliasing=True).astype(np.float32)
-        seg_mask_resized = resize(seg_mask_remapped, self.img_size, order=0, preserve_range=True,
-                                  anti_aliasing=False).astype(np.int64)
-
         # --- 转换为Tensor ---
         to_tensor = transforms.ToTensor()
         normalize_rgb = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])

@@ -5,9 +5,9 @@
 # -- Data Parameters --
 data:
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyu_depth_v2_labeled.mat"
-  batch_size: 8
+  batch_size: 4
   num_workers: 4
-  img_size: [224, 224]
+  img_size: [384,384] #[224, 224]
 
 # -- Model Parameters --
 model:
@@ -16,25 +16,77 @@ model:
   latent_dim_s: 128
   latent_dim_p: 256
   z_s_bottleneck_noise: 0.1
-  num_scene_classes: 27 # NYUv2有27个场景类别
+  num_scene_classes: 27     # NYUv2有27个场景类别
+  gating_scale_cap: 0.3
+
+  # === (可选) 分解式重构头的开关/超参，占位（当前代码不强依赖，留作记录） ===
+  decomposition:
+    enabled: true           # 仅标注用途；真正开关由 loss 权重控制
+    normal_head_hidden: 128
+    albedo_head_hidden: 128
+    light_head:
+      sh_degree: 2          # 二阶球谐（RGB 每通道9维），建议固定为2
+      grayscale_prior: true # 倾向近灰照明（同时由 lambda_sh_gray 约束）
+
+experiments:
+  enable: false
+  max_batches_swap: 8
+  max_batches_inv: 8
+  max_batches_cross: 20
 
 # -- Training Parameters --
 training:
   seed: 42
-  epochs: 30
+  epochs: 50
+  stage1_epochs: 10          # 你原有的阶段1设置保留
+  stage0_epochs: 3           # ★ 新增：分解预热期（仅训 A×S 相关项，等变/不变先不开）
   optimizer: "AdamW"
-  learning_rate: 0.00001
+  learning_rate: 0.0001
   weight_decay: 0.01
   enable_training: True
 
+  # === (可选) 等变/不变损失若在训练循环中启用，可用这两个权重 ===
+  lambda_equiv: 0.0          # z_s 对几何增强的等变；没接就留 0
+  lambda_invar: 0.0          # z_p 对几何增强的不变；没接就留 0
+
+  # === 独立性 warmup（CompositeLoss 里会读取） ===
+  ind_warmup_epochs: 10      # 线性 warmup 到 lambda_independence
+  lr_scheduler:
+    type: cosine          # 或 "step"
+    warmup_epochs: 3      # 仅 cosine 用
+    min_lr_factor: 0.1
+
 # -- Loss Weights --
 losses:
-    lambda_seg: 10.0          # 大幅提高
-    lambda_depth: 5.0          # 大幅提高
-    lambda_scene: 5.0          # 大幅提高
-    lambda_independence: 0.1   # 适当降低
-    alpha_recon_geom: 1.0      # 保持或适当降低
-    beta_recon_app: 3.0 # 这是LPIPS的权重
-    lambda_l1_recon: 3.0
-    alpha_recon_geom_aux: 0.5
-    beta_recon_app_aux: 2.5
+  # === 任务项（保持原值） ===
+  lambda_seg: 10.0
+  lambda_depth: 5.0
+  lambda_scene: 5.0
+
+  # === 独立性（Linear CKA）：基准强度 + warmup（见 training.ind_warmup_epochs） ===
+  lambda_independence: 1.0
+
+  # === 像素派重构（你原来的） ===
+  alpha_recon_geom: 1.0          # z_s -> depth 的像素重构
+  beta_recon_app: 3.0            # z_p -> appearance 的 LPIPS 主权重
+  lambda_l1_recon: 3.0           # LPIPS 的 L1 辅助权重
+  alpha_recon_geom_aux: 0.5
+  beta_recon_app_aux: 2.5
+  lambda_depth_zp: 1.0           # z_p_depth 辅助深度监督
+
+  # === 几何/分割边缘一致性（原有） ===
+  lambda_depth_edge_weight_alpha: 2.0
+  lambda_depth_edge_weight_q: 0.7      # 选取 GT 边缘最高的 30% 像素
+  lambda_depth_edge_weight_mix: 0.5
+  lambda_edge_consistency: 0.5
+  alpha_recon_geom_edges: 0.5
+  beta_seg_edge_from_geom: 0.5
+  lambda_main_depth_edge: 4.0
+
+  # === ★ 新增：分解式重构（Albedo × Shading）相关权重（默认都为0，逐步打开） ===
+  lambda_img: 1.0               # I_hat(A×S) 与目标图的 L1（线性色域）
+  lambda_alb_tv: 0.01           # 反照率 TV 平滑
+  lambda_alb_chroma: 0.01       # 反照率的色度平滑（Lab 的 ab；无 kornia 时退化为 RGB TV）
+  lambda_sh_gray: 0.1           # Shading 近灰约束
+  lambda_norm: 0.1              # 法线单位长度 + TV
+  lambda_xcov: 0.05             # Albedo 与 Normal 的交叉协方差（解耦泄漏抑制）

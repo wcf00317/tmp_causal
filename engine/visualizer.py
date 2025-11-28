@@ -71,8 +71,8 @@ def _visualize_microscope(model, batch, device, save_path, scene_class_map):
     pred_scene_name = scene_class_map[pred_scene_idx]
 
     recon_geom_raw = recon_geom_final[0].squeeze().cpu().numpy()
-    recon_app_rgb = lab_channels_to_rgb(recon_app_final[0], gt_depth.shape[:2])
-
+    #recon_app_rgb = lab_channels_to_rgb(recon_app_final[0], gt_depth.shape[:2])
+    recon_app_rgb = recon_app_final[0].detach().cpu().permute(1, 2, 0).numpy()
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
     title = f"Causal Microscope\nGT Scene: '{gt_scene_name}' | Pred Scene: '{pred_scene_name}' ({'Correct' if gt_scene_idx == pred_scene_idx else 'Wrong'})"
     fig.suptitle(title, fontsize=22)
@@ -132,31 +132,59 @@ def _visualize_mixer(model, batch_a, batch_b, device, save_path, scene_class_map
 
 def _visualize_depth_task(model, batch, device, save_path):
     """
-    生成一个独立的、专注于深度任务和 z_p_depth 解耦分析的可视化报告。
+    [已更新] 生成一个独立的、专注于深度任务和 z_s / z_p 解耦分析的可视化报告。
     """
     model.eval()
     idx = 0  # 仅可视化批次中的第一张图
 
     rgb_tensor = batch['rgb'][idx].unsqueeze(0).to(device)
-    with torch.no_grad():
-        outputs = model(rgb_tensor)
 
-    # --- 准备绘图所需的数据 ---
+    # --- 1. 准备绘图所需的基础数据 ---
     input_rgb = denormalize_image(batch['rgb'][idx])
     gt_depth = batch['depth'][idx].squeeze().cpu().numpy()
 
-    # 模型主干路的最终深度预测
-    pred_depth_main = outputs['pred_depth'][0].squeeze().cpu().numpy()
+    # --- 2. 手动执行模型的关键步骤以进行解耦分析 ---
+    #    (这比依赖 model.forward() 输出更鲁棒)
 
-    # 仅由 z_p_depth 解码出的深度图
-    pred_depth_zp = outputs['pred_depth_from_zp'][0].squeeze().cpu().numpy()
+    # a. 获取 ViT 特征
+    feature_map = model.encoder(rgb_tensor)  # [B, 768, 14, 14]
 
-    # 计算预测误差图
+    # b. 获取投影后的特征图 (f, z_s, z_p)
+    f_proj = model.proj_f(feature_map)  # [B, 256, 14, 14]
+    zs_map = model.projector_s(feature_map)
+    zs_proj = model.proj_z_s(zs_map)  # [B, 256, 14, 14]
+    zp_depth_map = model.projector_p_depth(feature_map)
+    zp_depth_proj = model.proj_z_p_depth(zp_depth_map)  # [B, 256, 14, 14]
+
+    # ====== 关键修改：适配门控解码器的两参接口 ======
+    # 主路径(main)只用 f_proj + zs_proj；z_p 作为第二个输入传入
+    depth_main = torch.cat([f_proj, zs_proj], dim=1)
+    zeros_main = torch.zeros_like(depth_main)
+    zeros_zp = torch.zeros_like(zp_depth_proj)
+    # ===============================================
+
+    with torch.no_grad():
+        # 完整的预测 (f + z_s + z_p)  ——> (main, zp)
+        pred_main_tensor = model.predictor_depth(depth_main, zp_depth_proj)
+
+        # 仅 Z_s 贡献： (main, 0)
+        pred_zs_only_tensor = model.predictor_depth(depth_main, zeros_zp)
+
+        # 仅 Z_p 贡献： (0, zp)
+        #pred_zp_only_tensor = model.predictor_depth(zeros_main, zp_depth_proj)
+        pred_zp_only_tensor = model.decoder_zp_depth(zp_depth_map)
+
+    # d. 将 Tensors 转换为 Numpy 数组
+    pred_depth_main = pred_main_tensor[0].squeeze().cpu().numpy()
+    pred_depth_zs = pred_zs_only_tensor[0].squeeze().cpu().numpy()  # <-- 新增
+    pred_depth_zp = pred_zp_only_tensor[0].squeeze().cpu().numpy()  # <-- 重新计算
+
+    # e. 计算预测误差图
     error_map = np.abs(pred_depth_main - gt_depth)
 
-    # --- 开始绘图 ---
-    fig, axes = plt.subplots(1, 5, figsize=(30, 6))
-    fig.suptitle("Depth Task & $z_{p,depth}$ Decoupling Analysis", fontsize=22)
+    # --- 3. 开始绘图 (1x6 布局) ---
+    fig, axes = plt.subplots(1, 6, figsize=(36, 6))  # <-- 扩展到 6 张图
+    fig.suptitle("Depth Task & Full Decoupling Analysis ($z_s$ vs $z_p$)", fontsize=22)
 
     # 使用百分位数来稳健地统一所有深度图的颜色范围
     vmin, vmax = np.percentile(gt_depth, [2, 98])
@@ -169,29 +197,37 @@ def _visualize_depth_task(model, batch, device, save_path):
     axes[1].imshow(gt_depth, cmap='plasma', vmin=vmin, vmax=vmax)
     axes[1].set_title("Ground Truth Depth", fontsize=16)
 
-    # 图 3: 主路预测深度
+    # 图 3: 主路预测深度 (f + z_s + z_p)
     axes[2].imshow(pred_depth_main, cmap='plasma', vmin=vmin, vmax=vmax)
-    axes[2].set_title("Main Predicted Depth", fontsize=16)
+    axes[2].set_title("Main Predicted Depth\n(from f + $z_s$ + $z_p$)", fontsize=16)
 
-    # 图 4: 从 z_p_depth 解码的深度
-    im_zp = axes[3].imshow(pred_depth_zp, cmap='plasma', vmin=vmin, vmax=vmax)
-    axes[3].set_title("Depth from $z_{p,depth}$ only", fontsize=16)
+    # --- 图 4: [新增] 从 z_s 解码的深度 ---
+    im_zs = axes[3].imshow(pred_depth_zs, cmap='plasma', vmin=vmin, vmax=vmax)
+    axes[3].set_title("Depth from $z_s$ only\n(Shared Geometry)", fontsize=16)
 
-    # 图 5: 预测误差
-    im_err = axes[4].imshow(error_map, cmap='hot')
-    axes[4].set_title("Prediction Error", fontsize=16)
+    # --- 图 5: [原图4] 从 z_p_depth 解码的深度 ---
+    im_zp = axes[4].imshow(pred_depth_zp, cmap='plasma', vmin=vmin, vmax=vmax)
+    axes[4].set_title("Depth from $z_{p,depth}$ only\n(Private Specifics)", fontsize=16)
+
+    # --- 图 6: [原图5] 预测误差 ---
+    im_err = axes[5].imshow(error_map, cmap='hot')
+    axes[5].set_title("Prediction Error", fontsize=16)
 
     # 美化图像
     for ax in axes.flat:
         ax.axis('off')
 
-    fig.colorbar(im_zp, ax=axes[3], fraction=0.046, pad=0.04)
-    fig.colorbar(im_err, ax=axes[4], fraction=0.046, pad=0.04)
+    # 调整色条
+    fig.colorbar(im_zs, ax=axes[3], fraction=0.046, pad=0.04)  # <-- 新增色条
+    fig.colorbar(im_zp, ax=axes[4], fraction=0.046, pad=0.04)  # <-- 调整到 axes[4]
+    fig.colorbar(im_err, ax=axes[5], fraction=0.046, pad=0.04)  # <-- 调整到 axes[5]
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.93])
     plt.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
-    print(f"  -> 已保存深度分析可视化报告: {save_path}")
+    print(f"  -> 已保存 *完整* 深度分析可视化报告: {save_path}")
+
+
 @torch.no_grad()
 def generate_visual_reports(model, data_loader, device, save_dir="visualizations_final", num_reports=3):
     """
@@ -232,5 +268,6 @@ def generate_visual_reports(model, data_loader, device, save_dir="visualizations
 
         # 增加对新函数的调用，使用 sample_a 进行分析
         _visualize_depth_task(model, sample_a, device, depth_analysis_path)
+
 
     print(f"✅ Final visualization reports saved to '{save_dir}'.")

@@ -4,17 +4,17 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 import os
 from data_utils.nyuv2_dataset import NYUv2Dataset
-import h5py
+import h5py,logging
 # --- 必改1: 确认模块/文件名一致性 ---
 # 请确保下面的导入路径与您项目中models/和losses/下的文件名完全一致
 # 例如，如果文件名是 causal_models.py (复数)，则应改为:
 # from models.causal_models import CausalMTLModel
 from models.causal_model import CausalMTLModel
-from losses.composite_loss import CompositeLoss
+from losses.composite_loss import CompositeLoss,AdaptiveCompositeLoss
 from datetime import datetime
 from engine.trainer import train
 from engine.visualizer import generate_visual_reports
-from utils.general_utils import set_seed
+from utils.general_utils import set_seed,setup_logging
 from torch.utils.data import Subset
 
 def main(config_path):
@@ -25,11 +25,9 @@ def main(config_path):
     try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-        print("✅ Configuration loaded successfully.")
         set_seed(config['training']['seed'])
-        print(f"🌱 Random seed set to {config['training']['seed']}")
     except Exception as e:
-        print(f"❌ Error loading config file: {e}")
+        logging.info(f"❌ Error loading config file: {e}")
         return
 
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
@@ -38,17 +36,21 @@ def main(config_path):
     vis_dir = os.path.join(run_dir, 'visualizations')
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(vis_dir, exist_ok=True)
-    print(f"📂 All outputs for this run will be saved in: {run_dir}")
+    setup_logging(run_dir)
+    logging.info("✅ Configuration loaded successfully.")
+    logging.info("🧩 Full configuration:\n" + yaml.dump(config, sort_keys=False, allow_unicode=True))
+    logging.info(f"🌱 Random seed set to {config['training']['seed']}")
+    logging.info(f"📂 All outputs for this run will be saved in: {run_dir}")
     # 2. 设置计算设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 Using device: {device}")
+    logging.info(f"🚀 Using device: {device}")
 
     # 3. 初始化数据集和数据加载器
-    print("\nInitializing dataset...")
+    logging.info("\nInitializing dataset...")
     try:
         # 确保我们导入的Dataset类名与文件名中的类名一致
 
-        print("Pre-loading scene metadata from HDF5 file...")
+        logging.info("Pre-loading scene metadata from HDF5 file...")
         with h5py.File(config['data']['dataset_path'], 'r') as db:
             scene_type_refs = db['sceneTypes']  # shape is (1, 1449)
             scene_types_list = []
@@ -71,7 +73,7 @@ def main(config_path):
 
         # --- 必改4: 根据设备情况设置pin_memory ---
         pin_memory = config['data'].get('pin_memory', torch.cuda.is_available())
-        print(f"💡 pin_memory set to: {pin_memory}")
+        logging.info(f"💡 pin_memory set to: {pin_memory}")
 
         train_loader = DataLoader(
             train_dataset, batch_size=config['data']['batch_size'], shuffle=True,
@@ -81,18 +83,17 @@ def main(config_path):
             val_dataset, batch_size=config['data']['batch_size'], shuffle=False,
             num_workers=config['data']['num_workers'], pin_memory=pin_memory
         )
-        print(f"📚 Dataset split into {len(train_dataset)} training and {len(val_dataset)} validation samples.")
+        logging.info(f"📚 Dataset split into {len(train_dataset)} training and {len(val_dataset)} validation samples.")
     except Exception as e:
-        print(f"❌ Error creating dataset/loaders: {e}")
+        logging.info(f"❌ Error creating dataset/loaders: {e}")
         return
 
     # 4. 初始化模型、优化器、调度器和损失函数
-    print("\nInitializing model and training components...")
+    logging.info("\nInitializing model and training components...")
     model = CausalMTLModel(
         model_config=config['model'],
         data_config=config['data']
     ).to(device)
-
     if config['training']['optimizer'] == 'AdamW':
         optimizer = optim.AdamW(
             model.parameters(), lr=config['training']['learning_rate'],
@@ -102,43 +103,54 @@ def main(config_path):
         optimizer = optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
 
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
-    criterion = CompositeLoss(loss_weights=config['losses']).to(device)
-    print("⚙️ Model, optimizer, scheduler, and loss function are ready.")
+    criterion = AdaptiveCompositeLoss(loss_weights=config['losses']).to(device)
+    logging.info("⚙️ Model, optimizer, scheduler, and loss function are ready.")
     # --- 必改6: 需确认CompositeLoss的返回接口与trainer兼容 ---
     # 我们已在上一版中统一 CompositeLoss 返回 (total_loss, loss_dict)，
     # 并且 trainer.py 中的代码已兼容此格式。
 
     # 6. 启动训练流程
-    print("\n----- Starting Training -----")
+    logging.info("\n----- Starting Training -----")
     if config['training'].get('enable_training', True):
         train(model, train_loader, val_loader, optimizer, criterion, scheduler, config, device, checkpoint_dir)
     else:
-        print("🏃 Training is disabled in the config. Skipping.")
+        logging.info("🏃 Training is disabled in the config. Skipping.")
+    from engine.experiments import run_all_experiments
+    exp_cfg = config.get('experiments', {})
+    if exp_cfg.get('enable', False):
+        logging.info("\n===== Running falsification experiments =====")
+        model.eval()
+        _ = run_all_experiments(
+            model, val_loader, device,
+            max_batches_swap=int(exp_cfg.get('max_batches_swap', 8)),
+            max_batches_inv=int(exp_cfg.get('max_batches_inv', 8)),
+            max_batches_cross=int(exp_cfg.get('max_batches_cross', 20)),
+        )
 
     # 7. 最终可视化与分析
-    print("\n----- Running Final Visualizations & Analysis -----")
+    logging.info("\n----- Running Final Visualizations & Analysis -----")
     best_checkpoint_path = os.path.join(checkpoint_dir, 'model_best.pth.tar')
     if os.path.exists(best_checkpoint_path):
-        print(f"🔍 Loading best model from {best_checkpoint_path} for visualization...")
+        logging.info(f"🔍 Loading best model from {best_checkpoint_path} for visualization...")
         checkpoint = torch.load(best_checkpoint_path, map_location=device)
         try:
             model.load_state_dict(checkpoint['state_dict'])
-            print("✅ Loaded checkpoint state_dict successfully.")
+            logging.info("✅ Loaded checkpoint state_dict successfully.")
         except RuntimeError as e:
-            print(f"⚠️ Warning: state_dict load error: {e}. Trying non-strict load.")
+            logging.info(f"⚠️ Warning: state_dict load error: {e}. Trying non-strict load.")
             model.load_state_dict(checkpoint['state_dict'], strict=False)
         model.eval()
         vis_loader = DataLoader(val_dataset, batch_size=2, shuffle=True)
         # --- 修改: 将新创建的 vis_dir 传递给可视化函数 ---
-        generate_visual_reports(model, vis_loader, device, save_dir=vis_dir,num_reports=3)
+        generate_visual_reports(model, vis_loader, device, save_dir=vis_dir,num_reports=5)
     else:
-        print(f"⚠️ Could not find best model checkpoint at '{best_checkpoint_path}'. Skipping final analysis.")
+        logging.info(f"⚠️ Could not find best model checkpoint at '{best_checkpoint_path}'. Skipping final analysis.")
     # --- 必改3: 安全地调用close方法 ---
     if hasattr(full_dataset, "close") and callable(full_dataset.close):
-        print("Closing dataset handler...")
+        logging.info("Closing dataset handler...")
         full_dataset.close()
 
-    print("\n🎉 Project execution finished.")
+    logging.info("\n🎉 Project execution finished.")
 
 
 if __name__ == '__main__':
