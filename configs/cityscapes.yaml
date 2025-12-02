@@ -1,0 +1,52 @@
+# configs/cityscapes.yaml
+
+# -- Data Parameters --
+data:
+  dataset_path: "../mtl_dataset/cityscapes" # 您的实际路径
+  batch_size: 8       # Cityscapes 图片大，如果显存够大可设 8，不够改 4
+  num_workers: 4
+  img_size: [384, 384] # 保持高分辨率以捕捉细节
+  pin_memory: True
+
+# -- Model Parameters --
+model:
+  encoder_name: "vit_b_16"
+  pretrained: True
+  latent_dim_s: 128
+  latent_dim_p: 256
+  z_s_bottleneck_noise: 0.1
+  num_scene_classes: 1 # Cityscapes 只有一个大类 "Driving" (或者按城市分，这里简化为1)
+
+# -- Training Parameters --
+training:
+  seed: 42
+  epochs: 50          # Cityscapes 数据量大，多训一会
+  optimizer: "AdamW"
+  learning_rate: 0.00001 # Base LR (Encoder 1e-5, Decoder 1e-4)
+  weight_decay: 0.01
+  enable_training: True
+  stage1_epochs: 5    # 冻结 Encoder 的预热期
+
+# -- Loss Weights --
+losses:
+  # 任务损失
+  lambda_seg: 10.0
+  lambda_depth: 5.0   # 开启深度监督（因为您下载了 disparity）
+  lambda_scene: 0.0   # 关闭场景分类（因为只有一个类，没法训）
+
+  # 因果解耦
+  lambda_independence: 0.1
+
+  # 重构损失
+  alpha_recon_geom: 1.0     # z_s -> depth
+  beta_recon_app: 3.0       # z_p -> RGB
+  lambda_l1_recon: 3.0
+  alpha_recon_geom_aux: 0.5
+  beta_recon_app_aux: 2.5
+  lambda_depth_zp: 1.0
+
+  # 边缘一致性
+  lambda_edge_consistency: 0.5
+  alpha_recon_geom_edges: 0.5
+  beta_seg_edge_from_geom: 0.0 # 暂时关闭，先跑通主干
+  lambda_main_depth_edge: 4.0

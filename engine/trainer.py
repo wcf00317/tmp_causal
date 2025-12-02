@@ -99,12 +99,20 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
     total_train_loss = 0.0
     pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Training]", leave=False)
 
-    for batch in pbar:
+    # 物理 BS=4，累积 8次 = 逻辑 BS 32
+    accumulation_steps = 8
+
+    # 1. 在循环外先清空一次梯度
+    optimizer.zero_grad(set_to_none=True)
+
+    for i, batch in enumerate(pbar):
         batch = {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
         rgb = batch['rgb']
 
-        optimizer.zero_grad(set_to_none=True)
-        outputs = model(rgb, stage=stage)   # 传入当前阶段
+        # ❌ 删除这行！不要在每次微步都清空！
+        # optimizer.zero_grad(set_to_none=True)
+
+        outputs = model(rgb, stage=stage)
 
         crit_out = criterion(outputs, batch)
         if isinstance(crit_out, (tuple, list)):
@@ -117,16 +125,28 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
         else:
             raise ValueError("criterion must return dict or (total_loss, dict).")
 
-        total_loss.backward()
-        optimizer.step()
+        # Loss 归一化，使得 8 次累加后的梯度幅值等效于一次大 Batch
+        loss_normalized = total_loss / accumulation_steps
+        loss_normalized.backward()
+
+        # --- 梯度累积逻辑 ---
+        # 只有达到累积步数时，才更新参数并清空梯度
+        if (i + 1) % accumulation_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True) # 更新完才清空！
 
         total_train_loss += float(total_loss.item())
         pbar.set_postfix(loss=f"{total_loss.item():.4f}")
 
+    # --- 【新增】处理循环结束时剩下的“尾巴” ---
+    # 如果总 batch 数不是 8 的倍数，最后积累的梯度也需要更新一次
+    if len(train_loader) % accumulation_steps != 0:
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
     avg_train_loss = total_train_loss / max(1, len(train_loader))
     logging.info(f"Epoch {epoch + 1} - Average Training Loss: {avg_train_loss:.4f}")
     return avg_train_loss
-
 
 def train(model, train_loader, val_loader, optimizer, criterion, scheduler, config, device, checkpoint_dir='checkpoints'):
     """

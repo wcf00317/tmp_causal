@@ -90,101 +90,128 @@ def _visualize_microscope(model, batch, device, save_path, scene_class_map):
     plt.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
+
 def _visualize_mixer(model, batch_a, batch_b, device, save_path, scene_class_map):
-    rgb_a = batch_a['rgb'][0].unsqueeze(0).to(device);
-    out_a = model(rgb_a);
-    z_s_a_map, z_p_a_map = out_a['z_s_map'], out_a['z_p_seg_map']
-    gt_scene_a = scene_class_map[batch_a['scene_type'][0].item()]
-    rgb_b = batch_b['rgb'][0].unsqueeze(0).to(device);
-    out_b = model(rgb_b);
-    z_s_b_map, z_p_b_map = out_b['z_s_map'], out_b['z_p_seg_map'];
-    gt_scene_b = scene_class_map[batch_b['scene_type'][0].item()]
-    img_size = tuple(rgb_a.shape[2:])
+    model.eval()
 
-    def create_hybrid(z_s_map, z_p_map):
-        # --- 调用解码器时，传入正确的 _map 变量 ---
-        geom_final, _ = model.decoder_geom(z_s_map)
-        app_final, _ = model.decoder_app(z_p_map)
-        geom = geom_final.squeeze()
-        app = lab_channels_to_rgb(app_final.squeeze(), img_size)
-        return fuse_geom_and_app(geom, app)
+    # --- 1. 提取 A 和 B 的特征 ---
+    rgb_a = batch_a['rgb'][0].unsqueeze(0).to(device)
+    rgb_b = batch_b['rgb'][0].unsqueeze(0).to(device)
 
-    hybrid_A_A = create_hybrid(z_s_a_map, z_p_a_map);
-    hybrid_A_B = create_hybrid(z_s_a_map, z_p_b_map);
-    hybrid_B_A = create_hybrid(z_s_b_map, z_p_a_map);
-    hybrid_B_B = create_hybrid(z_s_b_map, z_p_b_map)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 12), gridspec_kw={'wspace': 0.05, 'hspace': 0.25})
-    # ... (绘图的其余部分保持不变) ...
-    fig.suptitle("Visualization Report 2: The Causal Mixer", fontsize=22, y=0.97)
-    axes[0, 0].imshow(hybrid_A_A);
-    axes[0, 0].set_title(f"Reconstructed Scene A\n(GT Scene: '{gt_scene_a}')", fontsize=14)
-    axes[0, 1].imshow(hybrid_A_B);
-    axes[0, 1].set_title(f"Hybrid: Geom A + App B", fontsize=14)
-    axes[1, 0].imshow(hybrid_B_A);
-    axes[1, 0].set_title(f"Hybrid: Geom B + App A", fontsize=14)
-    axes[1, 1].imshow(hybrid_B_B);
-    axes[1, 1].set_title(f"Reconstructed Scene B\n(GT Scene: '{gt_scene_b}')", fontsize=14)
-    for ax in axes.flat: ax.set_xticks([]); ax.set_yticks([])
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    with torch.no_grad():
+        # 获取分解后的 latent
+        out_a = model(rgb_a)
+        out_b = model(rgb_b)
+
+        z_s_a = out_a['z_s']
+        z_p_a = out_a['z_p_depth']  # 注意：这里用 depth 分支的 z_p 还是 seg 分支的视你的假设而定
+
+        z_s_b = out_b['z_s']
+        z_p_b = out_b['z_p_depth']
+
+        # 获取 ViT 特征 f (用于主任务预测)
+        # 注意：这里需要再次 forward encoder 或者从 out_a 中想办法获取 f
+        # 为了简单，我们重新跑一遍 decoder 的部分逻辑
+        # 假设我们只验证 z_s 和 z_p 在 Decoder 里的行为
+
+        # --- 2. 交叉生成 (Swap) ---
+        # 目标：看看 z_s(A) + z_p(B) 生成的 深度图 是什么样的
+        # 预期：结构应该像 A，但细节可能带点 B 的噪声（如果解耦不完美）
+
+        # 为了可视化，我们主要看重构解码器 (Decoder_Geom 和 Decoder_App)
+
+        # 重构 A 的几何
+        recon_geom_a, _ = model.decoder_geom(out_a['z_s_map'])
+        # 重构 B 的外观 (直接当 RGB 处理，修正之前的 Lab 错误)
+        recon_app_b_logits, _ = model.decoder_app(out_b['z_p_seg_map'])
+        recon_app_b = torch.sigmoid(recon_app_b_logits)  # [1, 3, H, W] RGB
+
+        # 重构 A 的外观
+        recon_app_a_logits, _ = model.decoder_app(out_a['z_p_seg_map'])
+        recon_app_a = torch.sigmoid(recon_app_a_logits)
+
+    # --- 3. 数据转 Numpy 用于绘图 ---
+    input_rgb_a = denormalize_image(batch_a['rgb'][0])
+    input_rgb_b = denormalize_image(batch_b['rgb'][0])
+
+    # 几何图 (Depth)
+    geom_a = recon_geom_a.squeeze().cpu().numpy()
+
+    # 外观图 (Appearance) - 修正后的直接 RGB
+    app_a = recon_app_a.squeeze().permute(1, 2, 0).cpu().numpy()
+    app_b = recon_app_b.squeeze().permute(1, 2, 0).cpu().numpy()
+
+    # --- 4. 绘图：展示解耦的组件 ---
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle("Causal Disentanglement Analysis (Swap Test)", fontsize=22)
+
+    # 第一行：场景 A
+    axes[0, 0].imshow(input_rgb_a)
+    axes[0, 0].set_title(f"Input Image A\n({scene_class_map[batch_a['scene_type'][0].item()]})", fontsize=14)
+
+    axes[0, 1].imshow(geom_a, cmap='plasma')
+    axes[0, 1].set_title("Structure ($z_s^A$)\nShould contain Shape/Edges", fontsize=14)
+
+    axes[0, 2].imshow(app_a)
+    axes[0, 2].set_title("Appearance ($z_p^A$)\nShould contain Texture/Color", fontsize=14)
+
+    # 第二行：场景 B 的外观混入
+    axes[1, 0].imshow(input_rgb_b)
+    axes[1, 0].set_title(f"Input Image B\n({scene_class_map[batch_b['scene_type'][0].item()]})", fontsize=14)
+
+    axes[1, 1].imshow(app_b)
+    axes[1, 1].set_title("Appearance ($z_p^B$)\nSource of Style", fontsize=14)
+
+    # 这里放一个“合成”示意图，虽然我们没有训练 RGB 生成器
+    # 我们可以简单的把 Geom A 和 App B 叠在一起展示，但不要相乘
+    # 或者留白，或者展示 Task Prediction Swap（如果实现了的话）
+    # 这里我们展示 0.5 * Geom A (Gray) + 0.5 * App B (Color) 来看是否对齐
+    geom_a_norm = (geom_a - geom_a.min()) / (geom_a.max() - geom_a.min() + 1e-6)
+    geom_a_rgb = np.stack([geom_a_norm] * 3, axis=-1)
+    overlay = 0.6 * geom_a_rgb + 0.4 * app_b
+    axes[1, 2].imshow(np.clip(overlay, 0, 1))
+    axes[1, 2].set_title("Overlay: Struct A + App B\n(Check alignment)", fontsize=14)
+
+    for ax in axes.flat: ax.axis('off')
+    plt.tight_layout(rect=[0, 0.03, 1, 0.93])
     plt.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
 
 def _visualize_depth_task(model, batch, device, save_path):
     """
-    [已更新] 生成一个独立的、专注于深度任务和 z_s / z_p 解耦分析的可视化报告。
+    生成一个独立的、专注于深度任务和 z_p_depth 解耦分析的可视化报告。
+    【修复版】适配多尺度 ViT，不再手动执行 encoder/projector，而是直接利用 model 输出。
     """
     model.eval()
     idx = 0  # 仅可视化批次中的第一张图
 
     rgb_tensor = batch['rgb'][idx].unsqueeze(0).to(device)
 
-    # --- 1. 准备绘图所需的基础数据 ---
+    # --- 1. 获取模型输出 (使用 safe 的 forward) ---
+    with torch.no_grad():
+        outputs = model(rgb_tensor)
+
+    # --- 2. 准备绘图所需的数据 ---
     input_rgb = denormalize_image(batch['rgb'][idx])
     gt_depth = batch['depth'][idx].squeeze().cpu().numpy()
 
-    # --- 2. 手动执行模型的关键步骤以进行解耦分析 ---
-    #    (这比依赖 model.forward() 输出更鲁棒)
+    # 模型主干路的最终深度预测
+    pred_depth_main = outputs['pred_depth'][0].squeeze().cpu().numpy()
 
-    # a. 获取 ViT 特征
-    feature_map = model.encoder(rgb_tensor)  # [B, 768, 14, 14]
+    # 仅由 z_p_depth 解码出的深度图 (检查是否有 'pred_depth_from_zp'，没有则用 zeros 或跳过)
+    if 'pred_depth_from_zp' in outputs:
+        pred_depth_zp = outputs['pred_depth_from_zp'][0].squeeze().cpu().numpy()
+    else:
+        # 兼容性处理：如果模型没输出这个，就全黑
+        pred_depth_zp = np.zeros_like(pred_depth_main)
 
-    # b. 获取投影后的特征图 (f, z_s, z_p)
-    f_proj = model.proj_f(feature_map)  # [B, 256, 14, 14]
-    zs_map = model.projector_s(feature_map)
-    zs_proj = model.proj_z_s(zs_map)  # [B, 256, 14, 14]
-    zp_depth_map = model.projector_p_depth(feature_map)
-    zp_depth_proj = model.proj_z_p_depth(zp_depth_map)  # [B, 256, 14, 14]
-
-    # ====== 关键修改：适配门控解码器的两参接口 ======
-    # 主路径(main)只用 f_proj + zs_proj；z_p 作为第二个输入传入
-    depth_main = torch.cat([f_proj, zs_proj], dim=1)
-    zeros_main = torch.zeros_like(depth_main)
-    zeros_zp = torch.zeros_like(zp_depth_proj)
-    # ===============================================
-
-    with torch.no_grad():
-        # 完整的预测 (f + z_s + z_p)  ——> (main, zp)
-        pred_main_tensor = model.predictor_depth(depth_main, zp_depth_proj)
-
-        # 仅 Z_s 贡献： (main, 0)
-        pred_zs_only_tensor = model.predictor_depth(depth_main, zeros_zp)
-
-        # 仅 Z_p 贡献： (0, zp)
-        #pred_zp_only_tensor = model.predictor_depth(zeros_main, zp_depth_proj)
-        pred_zp_only_tensor = model.decoder_zp_depth(zp_depth_map)
-
-    # d. 将 Tensors 转换为 Numpy 数组
-    pred_depth_main = pred_main_tensor[0].squeeze().cpu().numpy()
-    pred_depth_zs = pred_zs_only_tensor[0].squeeze().cpu().numpy()  # <-- 新增
-    pred_depth_zp = pred_zp_only_tensor[0].squeeze().cpu().numpy()  # <-- 重新计算
-
-    # e. 计算预测误差图
+    # 计算预测误差图
     error_map = np.abs(pred_depth_main - gt_depth)
 
-    # --- 3. 开始绘图 (1x6 布局) ---
-    fig, axes = plt.subplots(1, 6, figsize=(36, 6))  # <-- 扩展到 6 张图
-    fig.suptitle("Depth Task & Full Decoupling Analysis ($z_s$ vs $z_p$)", fontsize=22)
+    # --- 3. 开始绘图 ---
+    fig, axes = plt.subplots(1, 5, figsize=(30, 6))
+    fig.suptitle("Depth Task & $z_{p,depth}$ Decoupling Analysis", fontsize=22)
 
     # 使用百分位数来稳健地统一所有深度图的颜色范围
     vmin, vmax = np.percentile(gt_depth, [2, 98])
@@ -197,36 +224,30 @@ def _visualize_depth_task(model, batch, device, save_path):
     axes[1].imshow(gt_depth, cmap='plasma', vmin=vmin, vmax=vmax)
     axes[1].set_title("Ground Truth Depth", fontsize=16)
 
-    # 图 3: 主路预测深度 (f + z_s + z_p)
+    # 图 3: 主路预测深度
     axes[2].imshow(pred_depth_main, cmap='plasma', vmin=vmin, vmax=vmax)
-    axes[2].set_title("Main Predicted Depth\n(from f + $z_s$ + $z_p$)", fontsize=16)
+    axes[2].set_title("Main Predicted Depth", fontsize=16)
 
-    # --- 图 4: [新增] 从 z_s 解码的深度 ---
-    im_zs = axes[3].imshow(pred_depth_zs, cmap='plasma', vmin=vmin, vmax=vmax)
-    axes[3].set_title("Depth from $z_s$ only\n(Shared Geometry)", fontsize=16)
+    # 图 4: 从 z_p_depth 解码的深度
+    im_zp = axes[3].imshow(pred_depth_zp, cmap='plasma', vmin=vmin, vmax=vmax)
+    axes[3].set_title("Depth from $z_{p,depth}$ only\n(Should be empty/noise)", fontsize=16)
 
-    # --- 图 5: [原图4] 从 z_p_depth 解码的深度 ---
-    im_zp = axes[4].imshow(pred_depth_zp, cmap='plasma', vmin=vmin, vmax=vmax)
-    axes[4].set_title("Depth from $z_{p,depth}$ only\n(Private Specifics)", fontsize=16)
-
-    # --- 图 6: [原图5] 预测误差 ---
-    im_err = axes[5].imshow(error_map, cmap='hot')
-    axes[5].set_title("Prediction Error", fontsize=16)
+    # 图 5: 预测误差
+    im_err = axes[4].imshow(error_map, cmap='hot')
+    axes[4].set_title("Prediction Error", fontsize=16)
 
     # 美化图像
     for ax in axes.flat:
         ax.axis('off')
 
-    # 调整色条
-    fig.colorbar(im_zs, ax=axes[3], fraction=0.046, pad=0.04)  # <-- 新增色条
-    fig.colorbar(im_zp, ax=axes[4], fraction=0.046, pad=0.04)  # <-- 调整到 axes[4]
-    fig.colorbar(im_err, ax=axes[5], fraction=0.046, pad=0.04)  # <-- 调整到 axes[5]
+    # Colorbars
+    fig.colorbar(im_zp, ax=axes[3], fraction=0.046, pad=0.04)
+    fig.colorbar(im_err, ax=axes[4], fraction=0.046, pad=0.04)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.93])
     plt.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
-    print(f"  -> 已保存 *完整* 深度分析可视化报告: {save_path}")
-
+    print(f"  -> 已保存深度分析可视化报告: {save_path}")
 
 @torch.no_grad()
 def generate_visual_reports(model, data_loader, device, save_dir="visualizations_final", num_reports=3):

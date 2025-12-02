@@ -121,7 +121,7 @@ class SegDepthDecoder(nn.Module):
             return nn.Sequential(
                 nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
                 nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
-                nn.BatchNorm2d(out_c),
+                nn.GroupNorm(num_groups=8, num_channels=out_c),
                 nn.ReLU(inplace=True)
             )
 
@@ -149,7 +149,7 @@ class CausalMTLModel(nn.Module):
         self.data_config = data_config
         self.zp_depth_gain = nn.Parameter(torch.tensor(0.0))
 
-        # Encoder
+        # Encoder (更新后返回多层特征列表)
         self.encoder = ViTEncoder(
             name=model_config['encoder_name'],
             pretrained=model_config['pretrained'],
@@ -161,17 +161,22 @@ class CausalMTLModel(nn.Module):
         self.latent_dim_s = model_config['latent_dim_s']
         self.latent_dim_p = model_config['latent_dim_p']
 
-        # Projectors
-        self.projector_s = nn.Conv2d(encoder_feature_dim, self.latent_dim_s, kernel_size=1)
-        self.projector_p_seg = nn.Conv2d(encoder_feature_dim, self.latent_dim_p, kernel_size=1)
-        self.projector_p_depth = nn.Conv2d(encoder_feature_dim, self.latent_dim_p, kernel_size=1)
+        # --- 修改：投影层输入维度变大 (Concatenation of 4 layers) ---
+        combined_feature_dim = encoder_feature_dim * 4
 
-        # Scene-level projector
+        # Projectors (输入是 combined_feature_dim)
+        self.projector_s = nn.Conv2d(combined_feature_dim, self.latent_dim_s, kernel_size=1)
+        self.projector_p_seg = nn.Conv2d(combined_feature_dim, self.latent_dim_p, kernel_size=1)
+        self.projector_p_depth = nn.Conv2d(combined_feature_dim, self.latent_dim_p, kernel_size=1)
+
+        # Scene-level projector (依然使用 Global Avg Pooling 后的特征，通常取最后一层)
+        # 这里为了简单，我们让 Scene Projector 依然只看最后一层的高层语义
         self.projector_p_scene = MLP(encoder_feature_dim, self.latent_dim_p)
 
         # 统一投影到 PROJ_CHANNELS 供任务解码
         PROJ_CHANNELS = 256
-        self.proj_f = nn.Conv2d(encoder_feature_dim, PROJ_CHANNELS, kernel_size=1)
+        self.proj_f = nn.Conv2d(combined_feature_dim, PROJ_CHANNELS, kernel_size=1)
+
         self.proj_z_s = nn.Conv2d(self.latent_dim_s, PROJ_CHANNELS, kernel_size=1)
         self.proj_z_p_seg = nn.Conv2d(self.latent_dim_p, PROJ_CHANNELS, kernel_size=1)
         self.proj_z_p_depth = nn.Conv2d(self.latent_dim_p, PROJ_CHANNELS, kernel_size=1)
@@ -182,6 +187,8 @@ class CausalMTLModel(nn.Module):
         num_seg_classes = 40
         num_scene_classes = model_config['num_scene_classes']
         self.zp_seg_refiner = ZpSegRefiner(c_in=PROJ_CHANNELS, out_classes=num_seg_classes, alpha=0.2)
+
+        # 使用更新了 GroupNorm 和 Bilinear Upsample 的门控解码器
         self.predictor_seg = GatedSegDepthDecoder(
             main_in_channels=decoder_main_dim, z_p_channels=PROJ_CHANNELS,
             out_channels=num_seg_classes, scale_cap=1.0
@@ -190,48 +197,61 @@ class CausalMTLModel(nn.Module):
             main_in_channels=decoder_main_dim, z_p_channels=PROJ_CHANNELS,
             out_channels=1, scale_cap=1.0
         )
+
         predictor_scene_input_dim = encoder_feature_dim + self.latent_dim_s + self.latent_dim_p
         self.predictor_scene = MLP(predictor_scene_input_dim, num_scene_classes)
         self.decoder_zp_depth = SegDepthDecoder(self.latent_dim_p, 1)
 
         # 原有的可视化重构（保留为 AUX）
+        # 这里为了简单，重构解码器依然只接收 z_s (128维) 或 z_p (256维)
+        # 所以不需要修改它们的输入维度
         from .building_blocks import ConvDecoder as VisualizationDecoder
         self.decoder_geom = ResNetDecoderWithDeepSupervision(self.latent_dim_s, 1, tuple(data_config['img_size']))
-        self.decoder_app  = ResNetDecoderWithDeepSupervision(self.latent_dim_p, 3, tuple(data_config['img_size']))
+        self.decoder_app = ResNetDecoderWithDeepSupervision(self.latent_dim_p, 3, tuple(data_config['img_size']))
         self.final_app_activation = nn.Sigmoid()
 
         # ======== 新增：分解式重构三件套 ========
         self.albedo_head = AlbedoHead(self.latent_dim_p, hidden=128)
         self.normal_head = NormalHead(self.latent_dim_s, hidden=128)
-        self.light_head  = LightHead(in_ch=encoder_feature_dim)
+        self.light_head = LightHead(in_ch=encoder_feature_dim)  # 使用 h (768)
 
         # 上采样到输入大小所需的目标尺寸
         self._target_size = tuple(data_config['img_size'])  # (H,W)
 
     def forward(
-        self,
-        x,
-        stage: int = 2,
-        override_zs_map: torch.Tensor | None = None,
-        override_zp_seg_map: torch.Tensor | None = None,
-        override_zp_depth_map: torch.Tensor | None = None,
+            self,
+            x,
+            stage: int = 2,
+            override_zs_map: torch.Tensor | None = None,
+            override_zp_seg_map: torch.Tensor | None = None,
+            override_zp_depth_map: torch.Tensor | None = None,
     ):
-        # 编码
-        feature_map = self.encoder(x)   # [B,C,14,14]（示例）
-        h = feature_map.mean(dim=[2, 3])
+        # 编码: 返回特征列表 [feat3, feat6, feat9, feat12]
+        # features 里的每个 tensor 都是 [B, 768, 14, 14]
+        features = self.encoder(x)
 
-        # 潜变量
-        z_s_map = self.projector_s(feature_map) if override_zs_map is None else override_zs_map
-        z_p_seg_map = self.projector_p_seg(feature_map) if override_zp_seg_map is None else override_zp_seg_map
-        z_p_depth_map = self.projector_p_depth(feature_map) if override_zp_depth_map is None else override_zp_depth_map
+        # 1. 拼接多层特征用于密集预测任务
+        combined_feat = torch.cat(features, dim=1)  # [B, 768*4, 14, 14]
+
+        # 2. 提取最后一层特征用于全局任务 (Scene Classification, Lighting)
+        last_feat = features[-1]
+        h = last_feat.mean(dim=[2, 3])  # [B, 768]
+
+        # 潜变量投影 (输入变为 combined_feat)
+        z_s_map = self.projector_s(combined_feat) if override_zs_map is None else override_zs_map
+        z_p_seg_map = self.projector_p_seg(combined_feat) if override_zp_seg_map is None else override_zp_seg_map
+        z_p_depth_map = self.projector_p_depth(
+            combined_feat) if override_zp_depth_map is None else override_zp_depth_map
 
         z_s = z_s_map.mean(dim=[2, 3])
         z_p_seg = z_p_seg_map.mean(dim=[2, 3])
         z_p_depth = z_p_depth_map.mean(dim=[2, 3])
+
+        # Scene Projector 依然使用 h
         z_p_scene = self.projector_p_scene(h)
 
         # 统一投影给任务解码器
-        f_proj = self.proj_f(feature_map)
+        f_proj = self.proj_f(combined_feat)
         zs_proj = self.proj_z_s(z_s_map)
         zp_seg_proj = self.proj_z_p_seg(z_p_seg_map)
         zp_depth_proj = self.proj_z_p_depth(z_p_depth_map)
@@ -241,9 +261,9 @@ class CausalMTLModel(nn.Module):
 
         # ---------- 分割 ----------
         seg_main = torch.cat([f_proj, zs_proj], dim=1)
-        pred_seg_main   = self.predictor_seg(  seg_main,   zp_seg_proj,   use_film=use_film, detach_zp=False)
+        pred_seg_main = self.predictor_seg(seg_main, zp_seg_proj, use_film=use_film, detach_zp=False)
         seg_residual = self.zp_seg_refiner(zp_seg_proj, out_size=pred_seg_main.shape[-2:]) \
-                        if use_zp_residual else torch.zeros_like(pred_seg_main)
+            if use_zp_residual else torch.zeros_like(pred_seg_main)
         pred_seg = pred_seg_main + seg_residual
 
         # ---------- 深度 ----------
@@ -251,7 +271,8 @@ class CausalMTLModel(nn.Module):
         pred_depth_main = self.predictor_depth(depth_main, zp_depth_proj, use_film=use_film, detach_zp=False)
         if use_zp_residual:
             zp_residual = self.zp_depth_refiner(zp_depth_proj)
-            zp_residual = F.interpolate(zp_residual, size=pred_depth_main.shape[-2:], mode='bilinear', align_corners=False)
+            zp_residual = F.interpolate(zp_residual, size=pred_depth_main.shape[-2:], mode='bilinear',
+                                        align_corners=False)
         else:
             zp_residual = torch.zeros_like(pred_depth_main)
         pred_depth = pred_depth_main + zp_residual
@@ -268,10 +289,10 @@ class CausalMTLModel(nn.Module):
         recon_app_aux = self.final_app_activation(recon_app_aux_logits)
 
         # ---------- 新增：分解式重构 ----------
-        A = self.albedo_head(z_p_seg_map)             # 由外观路
-        N = self.normal_head(z_s_map)                 # 由结构路
-        L = self.light_head(h)                        # 全局光照（低频 SH）
-        S = shading_from_normals(N, L)                # 明暗（近灰）
+        A = self.albedo_head(z_p_seg_map)  # 由外观路
+        N = self.normal_head(z_s_map)  # 由结构路
+        L = self.light_head(h)  # 全局光照（低频 SH）
+        S = shading_from_normals(N, L)  # 明暗（近灰）
 
         # 上采样到输入大小（如果当前特征分辨率 < 输入分辨率）
         target_size = self._target_size
@@ -280,7 +301,7 @@ class CausalMTLModel(nn.Module):
             N = F.interpolate(N, size=target_size, mode='bilinear', align_corners=False)
             S = F.interpolate(S, size=target_size, mode='bilinear', align_corners=False)
 
-        I_hat = torch.clamp(A * S, 0.0, 1.0)         # 分解式重构
+        I_hat = torch.clamp(A * S, 0.0, 1.0)  # 分解式重构
 
         outputs = {
             # 潜变量（原样保留）

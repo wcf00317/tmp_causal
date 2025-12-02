@@ -2,7 +2,7 @@ import yaml
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
-import os
+import os,argparse
 from data_utils.nyuv2_dataset import NYUv2Dataset
 import h5py,logging
 # --- 必改1: 确认模块/文件名一致性 ---
@@ -94,13 +94,28 @@ def main(config_path):
         model_config=config['model'],
         data_config=config['data']
     ).to(device)
+    base_lr = float(config['training']['learning_rate'])  # 例如 1e-5
+
+    # 2. 分离参数
+    # 获取 encoder 的参数内存地址 ID
+    encoder_params_ids = list(map(id, model.encoder.parameters()))
+
+    # 过滤参数：不在 encoder 中的就是 head/decoder 参数
+    backbone_params = model.encoder.parameters()
+    head_params = [p for n, p in model.named_parameters() if id(p) not in encoder_params_ids]
+
+    print(f"🔧 Optimizer setup: Backbone LR={base_lr}, Head/Decoder LR={base_lr * 10.0}")
+
     if config['training']['optimizer'] == 'AdamW':
-        optimizer = optim.AdamW(
-            model.parameters(), lr=config['training']['learning_rate'],
-            weight_decay=config['training']['weight_decay']
-        )
+        optimizer = optim.AdamW([
+            {'params': backbone_params, 'lr': base_lr},  # 预训练部分保持小 LR
+            {'params': head_params, 'lr': base_lr * 10.0}  # 新增部分放大 10 倍 LR
+        ], weight_decay=config['training']['weight_decay'])
     else:
-        optimizer = optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
+        optimizer = optim.Adam([
+            {'params': backbone_params, 'lr': base_lr},
+            {'params': head_params, 'lr': base_lr * 10.0}
+        ])
 
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
     criterion = AdaptiveCompositeLoss(loss_weights=config['losses']).to(device)
@@ -153,8 +168,18 @@ def main(config_path):
     logging.info("\n🎉 Project execution finished.")
 
 
+
 if __name__ == '__main__':
-    config_file = 'configs/base_full_model.yaml'
+    parser = argparse.ArgumentParser(description="Causal MTL Training")
+    # 添加 --config 参数，如果没有提供，默认使用 base_full_model.yaml
+    parser.add_argument('--config', type=str, default='configs/base_full_model.yaml', help='Path to the config file')
+
+    args = parser.parse_args()
+
+    # 使用命令行传入的参数
+    config_file = args.config
+
+    print(f"🚀 Loading configuration from: {config_file}")  # 打印一下以确认
+
     # 强烈建议: 在正式运行前，用一小部分数据进行冒烟测试(smoke test)
-    # 例如，可以在config中设置一个'debug_subset_size'参数，并在Dataset中实现只加载少量数据
     main(config_file)

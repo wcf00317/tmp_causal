@@ -5,8 +5,8 @@
 # -- Data Parameters --
 data:
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyu_depth_v2_labeled.mat"
-  batch_size: 4
-  num_workers: 4
+  batch_size: 8
+  num_workers: 8
   img_size: [384,384] #[224, 224]
 
 # -- Model Parameters --
