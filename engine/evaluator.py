@@ -22,8 +22,11 @@ def evaluate(model, val_loader, criterion, device, stage):
 
     miou_metric = torchmetrics.classification.MulticlassJaccardIndex(
         num_classes=num_seg_classes, ignore_index=255).to(device)
-    scene_acc_metric = torchmetrics.classification.MulticlassAccuracy(
-        num_classes=num_scene_classes).to(device)
+    if num_scene_classes > 1:
+        scene_acc_metric = torchmetrics.classification.MulticlassAccuracy(
+            num_classes=num_scene_classes).to(device)
+    else:
+        scene_acc_metric = None  # 标记为 None
     depth_mse_metric = torchmetrics.regression.MeanSquaredError().to(device)
     depth_mae_metric = torchmetrics.regression.MeanAbsoluteError().to(device)
 
@@ -60,7 +63,8 @@ def evaluate(model, val_loader, criterion, device, stage):
         total_cka_scene += loss_dict.get('cka_scene', torch.tensor(0.0)).item()
 
         miou_metric.update(outputs['pred_seg'], targets_on_device['segmentation'])
-        scene_acc_metric.update(outputs['pred_scene'], targets_on_device['scene_type'])
+        if scene_acc_metric is not None:
+            scene_acc_metric.update(outputs['pred_scene'], targets_on_device['scene_type'])
         pred_depth = outputs['pred_depth']
         gt_depth = targets_on_device['depth']
         depth_mse_metric.update(pred_depth, gt_depth)
@@ -79,7 +83,11 @@ def evaluate(model, val_loader, criterion, device, stage):
 
     # --- 6. 任务指标 ---
     final_miou = miou_metric.compute().item()
-    final_scene_acc = scene_acc_metric.compute().item()
+    if scene_acc_metric is not None:
+        final_scene_acc = scene_acc_metric.compute().item()
+        scene_acc_metric.reset()
+    else:
+        final_scene_acc = 1.0
     final_rmse = torch.sqrt(depth_mse_metric.compute()).item()
     final_mae = depth_mae_metric.compute().item()
 
@@ -96,11 +104,15 @@ def evaluate(model, val_loader, criterion, device, stage):
     logging.info("\n-- Downstream Task Metrics --")
     logging.info(f"  - Segmentation (mIoU): {final_miou:.4f}")
     logging.info(f"  - Depth (RMSE): {final_rmse:.4f}")
-    logging.info(f"  - Scene Classification (Acc): {final_scene_acc:.4f}")
+    if scene_acc_metric is not None:
+        logging.info(f"  - Scene Classification (Acc): {final_scene_acc:.4f}")
+    else:
+        logging.info(f"  - Scene Classification (Acc): N/A (Single Class)")
     logging.info("--------------------------")
 
     miou_metric.reset()
-    scene_acc_metric.reset()
+    if scene_acc_metric is not None:
+        scene_acc_metric.reset()
     depth_mse_metric.reset()
     depth_mae_metric.reset()
 

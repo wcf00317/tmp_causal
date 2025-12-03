@@ -101,27 +101,24 @@ class CityscapesDataset(Dataset):
         # 准备深度图数据 (numpy)
         # 默认初始化为全零 (H, W)
         depth_np = np.zeros((self.img_size[1], self.img_size[0]), dtype=np.float32)
+        # 2. ★新增：评估用的真实物理深度 (米)，初始化为 -1 (表示无效值)
+        depth_meters_np = np.full((self.img_size[1], self.img_size[0]), -1.0, dtype=np.float32)
 
         if os.path.exists(disp_path):
-            try:
-                disp = Image.open(disp_path)
-                # Resize 深度图 (Nearest 以保持原始值的物理意义，或者 Bilinear 插值)
-                # 为了计算方便，这里使用 Nearest
-                disp = disp.resize(self.img_size, Image.NEAREST)
-                disp_np = np.array(disp).astype(np.float32)
+            disp = Image.open(disp_path)
+            # Resize 深度图
+            disp = disp.resize(self.img_size, Image.NEAREST)
+            disp_np = np.array(disp).astype(np.float32)
 
-                # Cityscapes 深度计算公式: depth = (baseline * focal) / disparity
-                # baseline * focal approx 0.209 * 2262 = 473.6 (meters * pixels)
-                # disparity 存储时放大了 256 倍
-                # Depth = 473.6 / (disp_val / 256.0) = (473.6 * 256) / disp_val
-                # 这里我们直接使用 disp_val 的归一化值作为"相对逆深度"监督，这在深度学习中更稳定
-                # 或者您可以选择不转换，直接预测 Disparity
+            mask = disp_np > 0
 
-                mask = disp_np > 0
-                # 简单归一化到 0-1 (65535是 uint16 最大值)
-                depth_np[mask] = disp_np[mask] / 65535.0
-            except Exception:
-                pass  # 如果读取出错，保持全零
+            # (A) 训练用的归一化视差 (保持不变)
+            depth_np[mask] = disp_np[mask] / 65535.0
+
+            # (B) ★新增：计算物理深度 (米)
+            # Cityscapes 公式: depth = (baseline * focal) / (disp_val / 256.0)
+            # 常数 0.209375 * 2262.52 * 256.0 ≈ 121246.75
+            depth_meters_np[mask] = 121246.75 / disp_np[mask]
 
         # 4. Resize RGB 和 Label
         img = img.resize(self.img_size, Image.BILINEAR)
@@ -134,7 +131,9 @@ class CityscapesDataset(Dataset):
                 img = transforms.functional.hflip(img)
                 target = transforms.functional.hflip(target)
                 # depth 是 numpy array，用 np.fliplr 翻转
-                depth_np = np.fliplr(depth_np).copy()  # copy 以确保内存连续，防止转 tensor 报错
+                depth_np = np.fliplr(depth_np).copy()
+                # ★新增：物理深度图也要同步翻转！
+                depth_meters_np = np.fliplr(depth_meters_np).copy()
 
         # 6. 转 Tensor 和 归一化
         to_tensor = transforms.ToTensor()
@@ -158,7 +157,8 @@ class CityscapesDataset(Dataset):
             'depth': depth_tensor,
             'segmentation': seg_tensor,
             'scene_type': torch.tensor(0, dtype=torch.long),  # Cityscapes 只有一个场景类
-            'appearance_target': rgb_tensor_unnormalized
+            'appearance_target': rgb_tensor_unnormalized,
+            'depth_meters': torch.from_numpy(depth_meters_np).unsqueeze(0).float()
         }
 
     def close(self):

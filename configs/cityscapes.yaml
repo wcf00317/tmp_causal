@@ -2,6 +2,7 @@
 
 # -- Data Parameters --
 data:
+  type: "cityscapes"
   dataset_path: "../mtl_dataset/cityscapes" # 您的实际路径
   batch_size: 8       # Cityscapes 图片大，如果显存够大可设 8，不够改 4
   num_workers: 4
@@ -20,12 +21,12 @@ model:
 # -- Training Parameters --
 training:
   seed: 42
-  epochs: 50          # Cityscapes 数据量大，多训一会
+  epochs: 1 #75          # Cityscapes 数据量大，多训一会
   optimizer: "AdamW"
   learning_rate: 0.00001 # Base LR (Encoder 1e-5, Decoder 1e-4)
   weight_decay: 0.01
   enable_training: True
-  stage1_epochs: 5    # 冻结 Encoder 的预热期
+  stage1_epochs: 10    # 冻结 Encoder 的预热期
 
 # -- Loss Weights --
 losses:

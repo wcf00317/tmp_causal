@@ -10,7 +10,8 @@ import h5py,logging
 # 例如，如果文件名是 causal_models.py (复数)，则应改为:
 # from models.causal_models import CausalMTLModel
 from models.causal_model import CausalMTLModel
-from losses.composite_loss import CompositeLoss,AdaptiveCompositeLoss
+from losses.composite_loss import AdaptiveCompositeLoss
+from data_utils.cityscapes_dataset import CityscapesDataset
 from datetime import datetime
 from engine.trainer import train
 from engine.visualizer import generate_visual_reports
@@ -48,23 +49,47 @@ def main(config_path):
     # 3. 初始化数据集和数据加载器
     logging.info("\nInitializing dataset...")
     try:
-        # 确保我们导入的Dataset类名与文件名中的类名一致
+        data_cfg = config['data']
+        dataset_type = data_cfg.get('type', 'nyuv2').lower()  # 获取类型，默认为 'nyuv2' 以兼容旧配置
+        dataset_path = data_cfg['dataset_path']
+        img_size = tuple(data_cfg['img_size'])
 
-        logging.info("Pre-loading scene metadata from HDF5 file...")
-        with h5py.File(config['data']['dataset_path'], 'r') as db:
-            scene_type_refs = db['sceneTypes']  # shape is (1, 1449)
-            scene_types_list = []
+        logging.info(f"📋 Dataset Type Configuration: {dataset_type}")
 
-            for i in range(scene_type_refs.shape[1]):
-                ref = scene_type_refs[0, i]
-                scene_str = "".join(chr(c[0]) for c in db[ref])
-                scene_types_list.append(scene_str)
-        full_dataset = NYUv2Dataset(
-            mat_file_path=config['data']['dataset_path'],
-            img_size=tuple(config['data']['img_size']),scene_types_list=scene_types_list
-        )
+        # === 显式分支逻辑 ===
+        if dataset_type == 'cityscapes':
+            logging.info(f"📂 Loading CityscapesDataset from: {dataset_path}")
+            full_dataset = CityscapesDataset(
+                root_dir=dataset_path,
+                split='train',
+                img_size=img_size
+            )
 
-        # --- 必改7: 保证随机划分的可复现性 ---
+        elif dataset_type == 'nyuv2':
+            logging.info(f"📄 Loading NYUv2Dataset (HDF5) from: {dataset_path}")
+
+            # NYUv2 特有的预读取逻辑
+            logging.info("Pre-loading scene metadata from HDF5 file...")
+            with h5py.File(dataset_path, 'r') as db:
+                scene_type_refs = db['sceneTypes']
+                scene_types_list = []
+                for i in range(scene_type_refs.shape[1]):
+                    ref = scene_type_refs[0, i]
+                    scene_str = "".join(chr(c[0]) for c in db[ref])
+                    scene_types_list.append(scene_str)
+
+            full_dataset = NYUv2Dataset(
+                mat_file_path=dataset_path,
+                img_size=img_size,
+                scene_types_list=scene_types_list
+            )
+
+        else:
+            # 遇到不支持的类型直接报错，而不是瞎猜
+            raise ValueError(f"❌ Unsupported dataset type: '{dataset_type}'. "
+                             f"Supported types are: ['cityscapes', 'nyuv2']")
+
+
         g = torch.Generator()
         g.manual_seed(config['training']['seed'])
         train_size = int(0.8 * len(full_dataset))

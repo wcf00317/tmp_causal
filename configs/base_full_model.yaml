@@ -4,6 +4,7 @@
 
 # -- Data Parameters --
 data:
+  type: "nyuv2"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyu_depth_v2_labeled.mat"
   batch_size: 8
   num_workers: 8
@@ -37,7 +38,7 @@ experiments:
 # -- Training Parameters --
 training:
   seed: 42
-  epochs: 50
+  epochs: 50 #50
   stage1_epochs: 10          # 你原有的阶段1设置保留
   stage0_epochs: 3           # ★ 新增：分解预热期（仅训 A×S 相关项，等变/不变先不开）
   optimizer: "AdamW"
