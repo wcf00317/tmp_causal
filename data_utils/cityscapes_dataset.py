@@ -94,51 +94,72 @@ class CityscapesDataset(Dataset):
 
         # 3. 读取并计算深度 (Depth from Disparity)
         # 路径推导: leftImg8bit/train/city/xxx.png -> disparity/train/city/xxx_disparity.png
-        # 注意: disparity 文件名后缀是 '_disparity.png'
+        # 需要处理路径替换，Cityscapes 的 disparity 文件名后缀是 '_disparity.png'
         disp_path = img_path.replace('leftImg8bit', 'disparity').replace('.png', '.png')
-        # Cityscapes 文件名通常是: aachen_0000_leftImg8bit.png -> aachen_0000_disparity.png
-        # 需要仔细对一下文件名替换规则，通常是把 _leftImg8bit 换成 _disparity
         disp_path = disp_path.replace('_leftImg8bit', '_disparity')
 
-        # 相机参数 (用于计算深度)
-        # camera/train/city/xxx_camera.json
-        cam_path = img_path.replace('leftImg8bit', 'camera').replace('_leftImg8bit.png', '_camera.json')
-
-        # 加载 Disparity (16bit png)
-        # 官方公式: depth = (baseline * focal) / disparity
-        # 这里的 disparity 存储为 uint16，实际值 = pixel_value / 256.0
-        # 简单的平均基线 * 焦距常数 ≈ 0.209313 * 2262.52 ≈ 473.6
-        # 为了简化读取 json 的 I/O 开销，我们可以用平均常数，或者由网络学习相对深度
+        # 准备深度图数据 (numpy)
+        # 默认初始化为全零 (H, W)
+        depth_np = np.zeros((self.img_size[1], self.img_size[0]), dtype=np.float32)
 
         if os.path.exists(disp_path):
-            disp = Image.open(disp_path)
-            # Resize 深度图 (Nearest)
-            disp = disp.resize(self.img_size, Image.NEAREST)
-            disp_np = np.array(disp).astype(np.float32)
-            # 过滤无效值 (0 表示无穷远)
-            mask = disp_np > 0
-            depth_np = np.zeros_like(disp_np)
-            # Cityscapes 标准转换: depth = 0.22 * 2262 / (disp / 256)
-            # 简化处理：我们直接把 disp 归一化作为"逆深度"使用，或者直接作为深度监督
-            # 这里我们输出归一化的逆深度 (Inverse Depth)，更适合深度学习
-            depth_np[mask] = disp_np[mask] / 65535.0  # 简单归一化到 0-1
-        else:
-            # 如果没找到，给个全零
-            depth_np = np.zeros((self.img_size[1], self.img_size[0]), dtype=np.float32)
+            try:
+                disp = Image.open(disp_path)
+                # Resize 深度图 (Nearest 以保持原始值的物理意义，或者 Bilinear 插值)
+                # 为了计算方便，这里使用 Nearest
+                disp = disp.resize(self.img_size, Image.NEAREST)
+                disp_np = np.array(disp).astype(np.float32)
 
-        # ... (后续的数据增强、ToTensor 逻辑与之前一致) ...
-        # 注意对 depth_np 做同样的翻转增强
+                # Cityscapes 深度计算公式: depth = (baseline * focal) / disparity
+                # baseline * focal approx 0.209 * 2262 = 473.6 (meters * pixels)
+                # disparity 存储时放大了 256 倍
+                # Depth = 473.6 / (disp_val / 256.0) = (473.6 * 256) / disp_val
+                # 这里我们直接使用 disp_val 的归一化值作为"相对逆深度"监督，这在深度学习中更稳定
+                # 或者您可以选择不转换，直接预测 Disparity
 
-        # 4. 转 Tensor
+                mask = disp_np > 0
+                # 简单归一化到 0-1 (65535是 uint16 最大值)
+                depth_np[mask] = disp_np[mask] / 65535.0
+            except Exception:
+                pass  # 如果读取出错，保持全零
+
+        # 4. Resize RGB 和 Label
+        img = img.resize(self.img_size, Image.BILINEAR)
+        target = target.resize(self.img_size, Image.NEAREST)
+
+        # 5. 随机增强 (训练时) - 必须保证 img, target, depth 同步变换
+        if self.split == 'train':
+            if random.random() < 0.5:
+                # 水平翻转
+                img = transforms.functional.hflip(img)
+                target = transforms.functional.hflip(target)
+                # depth 是 numpy array，用 np.fliplr 翻转
+                depth_np = np.fliplr(depth_np).copy()  # copy 以确保内存连续，防止转 tensor 报错
+
+        # 6. 转 Tensor 和 归一化
+        to_tensor = transforms.ToTensor()
+
+        # RGB
+        rgb_tensor_unnormalized = to_tensor(img).float()
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        rgb_tensor_normalized = normalize(rgb_tensor_unnormalized)
+
+        # Label (Mapping)
+        target_np = np.array(target, dtype=np.int64)
+        target_mapped = self.mapping[target_np]
+        seg_tensor = torch.from_numpy(target_mapped).long()
+
+        # Depth
         depth_tensor = torch.from_numpy(depth_np).unsqueeze(0).float()  # [1, H, W]
-        # ...
 
+        # 7. 返回
         return {
             'rgb': rgb_tensor_normalized,
             'depth': depth_tensor,
             'segmentation': seg_tensor,
-            'scene_type': torch.tensor(0, dtype=torch.long),  # 占位
+            'scene_type': torch.tensor(0, dtype=torch.long),  # Cityscapes 只有一个场景类
             'appearance_target': rgb_tensor_unnormalized
         }
+
     def close(self):
         pass  # 不需要关闭文件句柄
