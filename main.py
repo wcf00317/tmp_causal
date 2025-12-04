@@ -5,12 +5,10 @@ from torch.utils.data import DataLoader, random_split
 import os,argparse
 from data_utils.nyuv2_dataset import NYUv2Dataset
 import h5py,logging
-# --- 必改1: 确认模块/文件名一致性 ---
-# 请确保下面的导入路径与您项目中models/和losses/下的文件名完全一致
-# 例如，如果文件名是 causal_models.py (复数)，则应改为:
-# from models.causal_models import CausalMTLModel
 from models.causal_model import CausalMTLModel
 from losses.composite_loss import AdaptiveCompositeLoss
+from models.baselines import RawMTLModel
+from losses.mtl_loss import MTLLoss
 from data_utils.cityscapes_dataset import CityscapesDataset
 from datetime import datetime
 from engine.trainer import train
@@ -115,39 +113,63 @@ def main(config_path):
 
     # 4. 初始化模型、优化器、调度器和损失函数
     logging.info("\nInitializing model and training components...")
-    model = CausalMTLModel(
-        model_config=config['model'],
-        data_config=config['data']
-    ).to(device)
-    base_lr = float(config['training']['learning_rate'])  # 例如 1e-5
+    model_type = config['model'].get('type', 'causal')
+    base_lr = float(config['training']['learning_rate'])
+    if model_type == 'raw_mtl':
+        logging.info("🏗️ Building Baseline: Raw MTL Model")
+        model = RawMTLModel(
+            model_config=config['model'],
+            data_config=config['data']
+        ).to(device)
 
-    # 2. 分离参数
-    # 获取 encoder 的参数内存地址 ID
-    encoder_params_ids = list(map(id, model.encoder.parameters()))
-
-    # 过滤参数：不在 encoder 中的就是 head/decoder 参数
-    backbone_params = model.encoder.parameters()
-    head_params = [p for n, p in model.named_parameters() if id(p) not in encoder_params_ids]
-
-    print(f"🔧 Optimizer setup: Backbone LR={base_lr}, Head/Decoder LR={base_lr * 10.0}")
-
-    if config['training']['optimizer'] == 'AdamW':
+        # Baseline 使用通用 Loss
+        strategy = config['training'].get('strategy', 'fixed')
+        use_uncertainty = (strategy == 'uncertainty')
+        logging.info(f"⚖️ Using Loss Strategy: {strategy}")
+        criterion = MTLLoss(loss_weights=config['losses'], use_uncertainty=use_uncertainty).to(device)
         optimizer = optim.AdamW([
-            {'params': backbone_params, 'lr': base_lr},  # 预训练部分保持小 LR
-            {'params': head_params, 'lr': base_lr * 10.0}  # 新增部分放大 10 倍 LR
+            {'params': model.encoder.parameters(), 'lr': base_lr},
+            {'params': model.seg_head.parameters(), 'lr': base_lr * 10},
+            {'params': model.depth_head.parameters(), 'lr': base_lr * 10},
+            {'params': model.scene_mlp.parameters(), 'lr': base_lr * 10},
+            {'params': model.shared_proj.parameters(), 'lr': base_lr * 10},
+            # 如果使用 uncertainty，loss 中也有参数需要优化
+            {'params': criterion.parameters(), 'lr': base_lr}
         ], weight_decay=config['training']['weight_decay'])
-    else:
-        optimizer = optim.Adam([
-            {'params': backbone_params, 'lr': base_lr},
-            {'params': head_params, 'lr': base_lr * 10.0}
-        ])
+        scheduler = None
 
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
-    criterion = AdaptiveCompositeLoss(loss_weights=config['losses']).to(device)
-    logging.info("⚙️ Model, optimizer, scheduler, and loss function are ready.")
-    # --- 必改6: 需确认CompositeLoss的返回接口与trainer兼容 ---
-    # 我们已在上一版中统一 CompositeLoss 返回 (total_loss, loss_dict)，
-    # 并且 trainer.py 中的代码已兼容此格式。
+
+    else:
+        logging.info("✨ Building Ours: Causal MTL Model")
+        model = CausalMTLModel(
+            model_config=config['model'],
+            data_config=config['data']
+        ).to(device)
+
+        # 2. 分离参数
+        # 获取 encoder 的参数内存地址 ID
+        encoder_params_ids = list(map(id, model.encoder.parameters()))
+
+        # 过滤参数：不在 encoder 中的就是 head/decoder 参数
+        backbone_params = model.encoder.parameters()
+        head_params = [p for n, p in model.named_parameters() if id(p) not in encoder_params_ids]
+
+        print(f"🔧 Optimizer setup: Backbone LR={base_lr}, Head/Decoder LR={base_lr * 10.0}")
+
+        if config['training']['optimizer'] == 'AdamW':
+            optimizer = optim.AdamW([
+                {'params': backbone_params, 'lr': base_lr},  # 预训练部分保持小 LR
+                {'params': head_params, 'lr': base_lr * 10.0}  # 新增部分放大 10 倍 LR
+            ], weight_decay=config['training']['weight_decay'])
+        else:
+            optimizer = optim.Adam([
+                {'params': backbone_params, 'lr': base_lr},
+                {'params': head_params, 'lr': base_lr * 10.0}
+            ])
+
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+        criterion = AdaptiveCompositeLoss(loss_weights=config['losses']).to(device)
+        logging.info("⚙️ Model, optimizer, scheduler, and loss function are ready.")
 
     # 6. 启动训练流程
     logging.info("\n----- Starting Training -----")
