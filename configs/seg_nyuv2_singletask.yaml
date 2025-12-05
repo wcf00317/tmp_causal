@@ -1,0 +1,33 @@
+# configs/seg_nyuv2_singletask.yaml
+
+data:
+  type: "nyuv2"
+  dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyu_depth_v2_labeled.mat"
+  batch_size: 8
+  num_workers: 8
+  img_size: [384, 384]
+  pin_memory: True
+
+model:
+  type: "single_task"    # 指定使用 SingleTaskModel
+  active_task: "seg"     # ★ 当前激活任务：分割
+  encoder_name: "vit_b_16"
+  pretrained: True
+  num_scene_classes: 27
+
+training:
+  seed: 42
+  epochs: 50
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  lr_scheduler:
+    type: cosine
+    warmup_epochs: 3
+    min_lr_factor: 0.1
+
+losses:
+  # 只保留分割的 Loss 权重，其他为 0
+  lambda_seg: 10.0
+  lambda_depth: 0.0
+  lambda_scene: 0.0

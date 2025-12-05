@@ -67,12 +67,16 @@ class GatedSegDepthDecoder(nn.Module):
         super().__init__()
 
         self.output_channels = out_channels
-
+        self.pre_smooth = nn.Sequential(
+            nn.Conv2d(main_in_channels, main_in_channels, kernel_size=3, padding=1, groups=1, bias=False),
+            nn.BatchNorm2d(main_in_channels),
+            nn.ReLU(inplace=True)
+        )
         def _up(in_c, out_c, do_resize=True):
             layers = []
             if do_resize:
-                #layers.append(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False))
-                layers.append(nn.Upsample(scale_factor=2, mode='nearest'))
+                layers.append(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False))
+                #layers.append(nn.Upsample(scale_factor=2, mode='nearest'))
             layers += [
                 nn.Conv2d(in_c, out_c, 3, padding=1, bias=False),
                 nn.BatchNorm2d(out_c),
@@ -101,8 +105,9 @@ class GatedSegDepthDecoder(nn.Module):
     def forward(self, main_feat, z_p_feat, use_film: bool = True, detach_zp: bool = False):
         # 绝不对 z_p_feat 做 detach，确保有梯度回传
         zpf = z_p_feat
+        x = self.pre_smooth(main_feat)
 
-        x = self.up1(main_feat); x = self.g1(x, zpf) if use_film else x
+        x = self.up1(x); x = self.g1(x, zpf) if use_film else x
         x = self.up2(x);         x = self.g2(x, zpf) if use_film else x
         x = self.up3(x);         x = self.g3(x, zpf) if use_film else x
         x = self.up4(x);         x = self.g4(x, zpf) if use_film else x

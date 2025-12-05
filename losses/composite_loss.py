@@ -439,7 +439,10 @@ class AdaptiveCompositeLoss(nn.Module):
 
         cka_seg = self.independence_loss(z_s_centered, z_p_seg - z_p_seg.mean(0, keepdim=True))
         cka_depth = self.independence_loss(z_s_centered, z_p_depth - z_p_depth.mean(0, keepdim=True))
-        cka_scene = self.independence_loss(z_s_centered, z_p_scene - z_p_scene.mean(0, keepdim=True))
+        if self.weights.get('lambda_scene', 0.0) > 0:
+            cka_scene = self.independence_loss(z_s_centered, z_p_scene - z_p_scene.mean(0, keepdim=True))
+        else:
+            cka_scene = torch.tensor(0.0, device=z_s.device)
 
         l_ind = cka_seg + cka_depth + cka_scene
         stage = int(outputs.get('stage', 2))

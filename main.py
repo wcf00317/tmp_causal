@@ -7,8 +7,9 @@ from data_utils.nyuv2_dataset import NYUv2Dataset
 import h5py,logging
 from models.causal_model import CausalMTLModel
 from losses.composite_loss import AdaptiveCompositeLoss
-from models.baselines import RawMTLModel
 from losses.mtl_loss import MTLLoss
+from models.baselines import RawMTLModel, SingleTaskModel
+from losses.single_task_loss import SingleTaskLoss
 from data_utils.cityscapes_dataset import CityscapesDataset
 from datetime import datetime
 from engine.trainer import train
@@ -125,7 +126,7 @@ def main(config_path):
         # Baseline 使用通用 Loss
         strategy = config['training'].get('strategy', 'fixed')
         use_uncertainty = (strategy == 'uncertainty')
-        logging.info(f"⚖️ Using Loss Strategy: {strategy}")
+        logging.info(f" Using Loss Strategy: {strategy}")
         criterion = MTLLoss(loss_weights=config['losses'], use_uncertainty=use_uncertainty).to(device)
         optimizer = optim.AdamW([
             {'params': model.encoder.parameters(), 'lr': base_lr},
@@ -137,10 +138,24 @@ def main(config_path):
             {'params': criterion.parameters(), 'lr': base_lr}
         ], weight_decay=config['training']['weight_decay'])
         scheduler = None
+    elif model_type == 'single_task':
+        logging.info(f"Building Single-Task Baseline: {config['model']['active_task']}")
+        model = SingleTaskModel(
+            model_config=config['model'],
+            data_config=config['data']
+        ).to(device)
 
+        criterion = SingleTaskLoss(
+            active_task=config['model']['active_task'],
+            loss_weights=config['losses']
+        ).to(device)
 
+        # 只将 encoder, shared_proj 和当前任务的 head 放入优化器
+        # 我们可以简单地用 model.parameters()，因为其他 head 根本没有被实例化
+        optimizer = optim.AdamW(model.parameters(), lr=base_lr, weight_decay=config['training']['weight_decay'])
+        scheduler = None
     else:
-        logging.info("✨ Building Ours: Causal MTL Model")
+        logging.info("Building Our Causal MTL Model")
         model = CausalMTLModel(
             model_config=config['model'],
             data_config=config['data']

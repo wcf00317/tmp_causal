@@ -1,0 +1,39 @@
+# configs/baseline_cityscape.yaml
+
+# -- Data Parameters --
+data:
+  type: "cityscapes"
+  dataset_path: "../mtl_dataset/cityscapes" # 请确保与您的 cityscapes.yaml 路径一致
+  batch_size: 8       # 显存允许的话建议 8，否则改 4
+  num_workers: 4
+  img_size: [384, 384]
+  pin_memory: True
+
+# -- Model Parameters --
+model:
+  type: "raw_mtl"        # ★ 关键：指定使用 Baseline 模型
+  encoder_name: "vit_b_16"
+  pretrained: True
+  num_scene_classes: 1   # Cityscapes 默认为 1 个大类，不进行场景分类训练
+
+# -- Training Parameters --
+training:
+  seed: 42
+  epochs: 100            # Cityscapes 数据集较大，建议多训一些 epoch
+  optimizer: "AdamW"
+  learning_rate: 0.0001  # 标准 Baseline LR (1e-4)
+  weight_decay: 0.01
+
+  # Baseline 策略
+  strategy: "fixed"      # 可选: "fixed" (Raw MTL) 或 "uncertainty" (Kendall)
+
+  lr_scheduler:
+    type: cosine
+    warmup_epochs: 3
+    min_lr_factor: 0.1
+
+# -- Loss Weights --
+losses:
+  lambda_seg: 10.0
+  lambda_depth: 5.0
+  lambda_scene: 0.0      # Cityscapes 只有一个场景类，关闭此 Loss
