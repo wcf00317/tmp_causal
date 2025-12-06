@@ -65,11 +65,11 @@ losses:
   lambda_scene: 0.0   # 关闭场景分类（因为只有一个类，没法训）
 
   # 因果解耦
-  lambda_independence: 0.01
+  lambda_independence: 0.1 #0.01
 
   # 重构损失
   alpha_recon_geom: 1.0     # z_s -> depth
-  beta_recon_app: 0.5       # z_p -> RGB
+  beta_recon_app: 3.0 #0.5       # z_p -> RGB
   lambda_l1_recon: 3.0
   alpha_recon_geom_aux: 0.5
   beta_recon_app_aux: 2.5

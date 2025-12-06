@@ -75,7 +75,14 @@ class GatedSegDepthDecoder(nn.Module):
         def _up(in_c, out_c, do_resize=True):
             layers = []
             if do_resize:
-                layers.append(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False))
+                return nn.Sequential(
+                    # kernel_size=4, stride=2, padding=1 是标准的 2倍上采样配置
+                    # 它能完美地将尺寸翻倍 (e.g., 24 -> 48) 且没有棋盘伪影
+                    nn.ConvTranspose2d(in_c, out_c, kernel_size=4, stride=2, padding=1, bias=False),
+                    nn.BatchNorm2d(out_c),
+                    nn.ReLU(inplace=True)
+                )
+                #layers.append(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False))
                 #layers.append(nn.Upsample(scale_factor=2, mode='nearest'))
             layers += [
                 nn.Conv2d(in_c, out_c, 3, padding=1, bias=False),

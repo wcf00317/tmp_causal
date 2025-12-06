@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 import os,argparse
 from data_utils.nyuv2_dataset import NYUv2Dataset
+from data_utils.gta5_dataset import GTA5Dataset
 import h5py,logging
 from models.causal_model import CausalMTLModel
 from losses.composite_loss import AdaptiveCompositeLoss
@@ -50,13 +51,35 @@ def main(config_path):
     try:
         data_cfg = config['data']
         dataset_type = data_cfg.get('type', 'nyuv2').lower()  # 获取类型，默认为 'nyuv2' 以兼容旧配置
-        dataset_path = data_cfg['dataset_path']
+        #dataset_path = data_cfg['dataset_path']
         img_size = tuple(data_cfg['img_size'])
 
         logging.info(f"📋 Dataset Type Configuration: {dataset_type}")
+        if dataset_type == 'gta5_to_cityscapes':
+            logging.info("🌍 Mode: Sim-to-Real (Train on GTA5, Val on Cityscapes)")
+            # 1. 加载 GTA5 Train
+            train_path = data_cfg['train_dataset_path']
+            logging.info(f"   -> Loading Source Train: {train_path}")
+            train_dataset = GTA5Dataset(root_dir=train_path, img_size=img_size)
 
+            # 2. 加载 Cityscapes Val (Target)
+            target_val_path = data_cfg['val_dataset_path']
+            logging.info(f"   -> Loading Target Val: {target_val_path}")
+            val_dataset = CityscapesDataset(root_dir=target_val_path, split='val', img_size=img_size)
+
+            # 3. 加载 GTA5 Val (Source Held-out)
+            source_val_path = data_cfg.get('source_val_path')
+            if source_val_path and os.path.exists(source_val_path):
+                logging.info(f"   -> Loading Source Val: {source_val_path}")
+                source_val_dataset = GTA5Dataset(root_dir=source_val_path, img_size=img_size)
+            else:
+                logging.warning(f"⚠️ Source val path not found or empty: {source_val_path}")
+
+            # 这里的 full_dataset 只是为了兼容后面的一行代码，可以指向 train_dataset
+            full_dataset = train_dataset
         # === 显式分支逻辑 ===
-        if dataset_type == 'cityscapes':
+        elif dataset_type == 'cityscapes':
+            dataset_path = data_cfg['dataset_path']
             logging.info(f"📂 Loading CityscapesDataset from: {dataset_path}")
             full_dataset = CityscapesDataset(
                 root_dir=dataset_path,
@@ -65,6 +88,7 @@ def main(config_path):
             )
 
         elif dataset_type == 'nyuv2':
+            dataset_path = data_cfg['dataset_path']
             logging.info(f"📄 Loading NYUv2Dataset (HDF5) from: {dataset_path}")
 
             # NYUv2 特有的预读取逻辑
@@ -222,7 +246,6 @@ def main(config_path):
         generate_visual_reports(model, vis_loader, device, save_dir=vis_dir,num_reports=5)
     else:
         logging.info(f"⚠️ Could not find best model checkpoint at '{best_checkpoint_path}'. Skipping final analysis.")
-    # --- 必改3: 安全地调用close方法 ---
     if hasattr(full_dataset, "close") and callable(full_dataset.close):
         logging.info("Closing dataset handler...")
         full_dataset.close()

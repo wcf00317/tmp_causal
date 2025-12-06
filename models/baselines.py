@@ -152,7 +152,8 @@ class RawMTLModel(nn.Module):
         self.scene_mlp = MLP(self.shared_dim, self.num_scene_classes, hidden_dim=256)
 
         # --- Seg Head ---
-        self.num_seg_classes = 40
+        #self.num_seg_classes = 40
+        self.num_seg_classes = model_config.get('num_seg_classes', 40)
         self.seg_head = SegDepthDecoder(input_channels=self.shared_dim, output_channels=self.num_seg_classes)
 
         # --- Depth Head ---
