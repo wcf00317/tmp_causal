@@ -11,15 +11,15 @@ import numpy as np
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, criterion, device, stage):
+def evaluate(model, val_loader, criterion, device, stage, data_type):
     """
     评估模型，并返回所有任务及重构任务的指标。
+    已移除 Scene，新增 Normal CKA 及基于 data_type 的日志控制。
     """
     model.eval()
 
     # --- 1. 初始化所有指标对象 ---
     num_seg_classes = model.predictor_seg.output_channels
-    num_scene_classes = model.predictor_scene.out_features
 
     # [FIXED] 将 ignore_index 从 255 改为 -1，以匹配 LibMTL 数据格式
     miou_metric = torchmetrics.classification.MulticlassJaccardIndex(
@@ -27,12 +27,6 @@ def evaluate(model, val_loader, criterion, device, stage):
 
     pixel_acc_metric = torchmetrics.classification.MulticlassAccuracy(
         num_classes=num_seg_classes, average='micro', ignore_index=-1).to(device)
-
-    if num_scene_classes > 1:
-        scene_acc_metric = torchmetrics.classification.MulticlassAccuracy(
-            num_classes=num_scene_classes).to(device)
-    else:
-        scene_acc_metric = None  # 标记为 None
 
     # [MODIFIED]: 使用自定义的 LibMTL 指标
     depth_metric = DepthMetric().to(device)
@@ -43,9 +37,10 @@ def evaluate(model, val_loader, criterion, device, stage):
     total_recon_geom_loss = 0.0
     total_recon_app_loss = 0.0
     total_independence_loss = 0.0
+
     total_cka_seg = 0.0
     total_cka_depth = 0.0
-    total_cka_scene = 0.0
+    total_cka_normal = 0.0  # [NEW] 追踪 Normal 分支的 CKA
 
     pbar = tqdm(val_loader, desc="Evaluating", leave=False)
 
@@ -60,19 +55,20 @@ def evaluate(model, val_loader, criterion, device, stage):
         else:
             loss_dict = crit_out
 
+        # 累加基础 Loss
         total_val_loss += loss_dict.get('total_loss', torch.tensor(0.0)).item()
         total_recon_geom_loss += loss_dict.get('recon_geom_loss', torch.tensor(0.0)).item()
         total_recon_app_loss += loss_dict.get('recon_app_loss', torch.tensor(0.0)).item()
         total_independence_loss += loss_dict.get('independence_loss', torch.tensor(0.0)).item()
 
+        # 累加 CKA Loss
         total_cka_seg += loss_dict.get('cka_seg', torch.tensor(0.0)).item()
         total_cka_depth += loss_dict.get('cka_depth', torch.tensor(0.0)).item()
-        total_cka_scene += loss_dict.get('cka_scene', torch.tensor(0.0)).item()
+        total_cka_normal += loss_dict.get('cka_normal', torch.tensor(0.0)).item()  # [NEW]
 
+        # 更新任务指标
         miou_metric.update(outputs['pred_seg'], targets_on_device['segmentation'])
         pixel_acc_metric.update(outputs['pred_seg'], targets_on_device['segmentation'])
-        if scene_acc_metric is not None:
-            scene_acc_metric.update(outputs['pred_scene'], targets_on_device['scene_type'])
 
         # [NEW]: 法线指标更新
         if 'normal' in targets_on_device and 'normals' in outputs:
@@ -91,57 +87,56 @@ def evaluate(model, val_loader, criterion, device, stage):
 
     avg_cka_seg = total_cka_seg / num_batches
     avg_cka_depth = total_cka_depth / num_batches
-    avg_cka_scene = total_cka_scene / num_batches
+    avg_cka_normal = total_cka_normal / num_batches  # [NEW]
 
-    # --- 6. 任务指标 ---
+    # --- 6. 任务指标计算 ---
     final_miou = miou_metric.compute().item()
     final_pixel_acc = pixel_acc_metric.compute().item()
-
-    if scene_acc_metric is not None:
-        final_scene_acc = scene_acc_metric.compute().item()
-        scene_acc_metric.reset()
-    else:
-        final_scene_acc = 1.0
 
     # [MODIFIED]: 深度指标
     final_abs_err, final_rel_err = depth_metric.compute()
 
-    # [NEW]: 法线指标
-    mean_angle, median_angle, acc_11, acc_22, acc_30 = normal_metric.compute()
-
-    # --- 7. 打印报告 ---
-    logging.info("\n--- Validation Results ---")
-    logging.info(f"Average Total Loss: {avg_val_loss:.4f}")
-    logging.info("\n-- Causal & Reconstruction Losses --")
-    logging.info(f"  - Independence Loss (Linear CKA): {avg_independence_loss:.4f}")
-    logging.info(f"  - CKA (z_s vs z_p_seg):   {avg_cka_seg:.6f} (越低越好)")
-    logging.info(f"  - CKA (z_s vs z_p_depth): {avg_cka_depth:.6f} (越低越好)")
-    logging.info(f"  - CKA (z_s vs z_p_scene): {avg_cka_scene:.6f} (越低越好)")
-    logging.info(f"  - Geometry Recon Loss: {avg_recon_geom_loss:.4f}  <-- 几何清晰度指标")
-    logging.info(f"  - Appearance Recon Loss: {avg_recon_app_loss:.4f}  <-- 外观清晰度指标")
-    logging.info("\n-- Downstream Task Metrics --")
-    logging.info(f"  - Segmentation: mIoU={final_miou:.4f}, Pixel Acc={final_pixel_acc:.4f}")
-
-    # [MODIFIED]: 深度指标报告
-    logging.info(f"  - Depth:        Abs Err={final_abs_err:.4f}, Rel Err={final_rel_err:.4f}")
-
-    # [NEW]: 法线指标报告
-    logging.info(f"  - Normal:       Mean Ang={mean_angle:.2f}°, Median Ang={median_angle:.2f}°")
-    logging.info(f"                  Acc@11.25°={acc_11:.4f}, Acc@22.5°={acc_22:.4f}, Acc@30°={acc_30:.4f}")
-
-    if scene_acc_metric is not None:
-        logging.info(f"  - Scene Classification (Acc): {final_scene_acc:.4f}")
+    # [NEW]: 法线指标 (安全计算，防空)
+    if len(normal_metric.record) > 0:
+        mean_angle, median_angle, acc_11, acc_22, acc_30 = normal_metric.compute()
     else:
-        logging.info(f"  - Scene Classification (Acc): N/A (Single Class)")
+        mean_angle, median_angle, acc_11, acc_22, acc_30 = 0.0, 0.0, 0.0, 0.0, 0.0
+
+    # --- 7. 打印报告 (Log) ---
+    logging.info("\n--- Validation Results ---")
+
+    # 打印 Loss 概览
+    log_loss = (f"Avg Loss: {avg_val_loss:.4f} | "
+                f"Indep(CKA): {avg_independence_loss:.4f} | "
+                f"Recon: G={avg_recon_geom_loss:.4f}, A={avg_recon_app_loss:.4f}")
+    logging.info(log_loss)
+
+    # 打印 CKA 详情 (包含 Normal)
+    logging.info(f" - CKA (z_s vs z_p_seg): {avg_cka_seg:.6f} (越低越好)")
+    logging.info(f" - CKA (z_s vs z_p_depth): {avg_cka_depth:.6f} (越低越好)")
+    logging.info(f" - CKA (z_s vs z_p_normal): {avg_cka_normal:.6f} (越低越好)")
+
+    logging.info("-- Downstream Task Metrics --")
+
+    # 1. 基础任务 (Seg/Depth 总是打印)
+    task_str = f"  - Seg:   mIoU={final_miou:.4f}, Pixel Acc={final_pixel_acc:.4f}\n"
+    task_str += f"  - Depth: Abs Err={final_abs_err:.4f}, Rel Err={final_rel_err:.4f}"
+
+    # 2. 法线 (Normal) - 根据 data_type 决定是否打印
+    if 'nyuv2' in str(data_type).lower():
+        task_str += (f"\n  - Normal: Mean={mean_angle:.2f}°, Med={median_angle:.2f}° | "
+                     f"Acc: 11°={acc_11:.3f}, 22°={acc_22:.3f}, 30°={acc_30:.3f}")
+
+    logging.info(task_str)
     logging.info("--------------------------")
 
+    # Reset metrics
     miou_metric.reset()
-    if scene_acc_metric is not None:
-        scene_acc_metric.reset()
+    pixel_acc_metric.reset()
     depth_metric.reset()
     normal_metric.reset()
 
-    # [CORRECTED RETURN]: 返回所有 LibMTL 要求的指标
+    # [CORRECTED RETURN]: 返回所有指标 (移除 Scene，包含 Normal)
     return {
         'val_loss': avg_val_loss,
         'recon_geom_loss': avg_recon_geom_loss,
@@ -154,11 +149,8 @@ def evaluate(model, val_loader, criterion, device, stage):
         'normal_median_angle': median_angle,
         'normal_acc_11': acc_11,
         'normal_acc_22': acc_22,
-        'normal_acc_30': acc_30,
-        'scene_acc': final_scene_acc
+        'normal_acc_30': acc_30
     }
-
-
 # ======= 辅助函数 (QUICK DIAGNOSE) =======
 
 @torch.no_grad()

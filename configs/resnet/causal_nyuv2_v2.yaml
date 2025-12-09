@@ -1,0 +1,77 @@
+# configs/resnet/causal_nyuv2_v6_task_supremacy.yaml
+# V6 策略：牺牲部分可视化清晰度，换取全指标 SOTA
+
+# -- Data --
+data:
+  type: "nyuv2"
+  dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
+  batch_size: 8
+  num_workers: 4
+  img_size: [384, 384]
+  pin_memory: True
+
+# -- Model --
+model:
+  type: "causal"
+  encoder_name: "resnet50"
+  pretrained: True
+  latent_dim_s: 128
+  latent_dim_p: 256
+  z_s_bottleneck_noise: 0.1
+  num_scene_classes: 1
+  num_seg_classes: 40
+  gating_scale_cap: 0.3
+
+  decomposition:
+    enabled: true
+    normal_head_hidden: 128
+    albedo_head_hidden: 128
+    light_head:
+      sh_degree: 2
+      grayscale_prior: true
+
+# -- Training --
+training:
+  seed: 999
+  epochs: 100
+  optimizer: "Adam"
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  enable_training: True
+  
+  stage1_epochs: 10       # 更快进入联合训练
+  ind_warmup_epochs: 10
+
+  lr_scheduler:
+    type: "cosine"
+    warmup_epochs: 5
+    min_lr_factor: 0.01
+
+# -- Losses --
+losses:
+  # 1. 任务损失 (全面拉升)
+  lambda_seg: 10.0        # [MAX]
+  lambda_depth: 20.0      # [MAX] 给深度最高优先级
+  lambda_normal: 10.0     # [MAX]
+  lambda_scene: 0.0
+
+  # 2. 因果约束 (弱)
+  lambda_independence: 0.05 # [LOW] 不强求低 CKA，只要不崩溃即可
+
+  # 3. 重构损失 (极低)
+  alpha_recon_geom: 0.5   # [LOW] 仅作为弱监督
+  beta_recon_app: 0.5
+  lambda_l1_recon: 1.0
+
+  # 4. 辅助
+  alpha_recon_geom_aux: 0.1
+  beta_recon_app_aux: 0.1
+  lambda_depth_zp: 0.1
+
+  # 5. 分解正则 (极低)
+  lambda_img: 0.5         # [LOW] 保证基本生成能力即可，不求高清
+  lambda_alb_tv: 0.001
+  lambda_alb_chroma: 0.001
+  lambda_sh_gray: 0.01
+  lambda_norm: 0.01
+  lambda_xcov: 0.01

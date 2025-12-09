@@ -1,5 +1,5 @@
-# configs/resnet/causal_cityscapes_v7_depthboost.yaml
-# V7 策略：拉升深度权重至 10.0，消除“偏科”现象，冲击 Abs Err SOTA
+# configs/resnet/causal_cityscapes_v8_puretask.yaml
+# V8 策略：降低重构干扰，全力优化 Seg 和 Depth 任务指标
 
 # -- Data Parameters --
 data:
@@ -32,18 +32,16 @@ model:
 
 # -- Training Parameters --
 training:
-  seed: 42
+  seed: 888               # 换个种子
   epochs: 100
   optimizer: "Adam"
   learning_rate: 0.0001
   weight_decay: 0.00001
   enable_training: True
 
-  # 保持预热
   stage1_epochs: 20
   ind_warmup_epochs: 20
 
-  # 保持 Cosine (它证明了有效性)
   lr_scheduler:
     type: "cosine"
     warmup_epochs: 5
@@ -51,29 +49,29 @@ training:
 
 # -- Loss Weights --
 losses:
-  # 1. 任务损失 (关键调整)
-  lambda_seg: 10.0        # [KEEP] 保持高位，稳住 0.70 mIoU
-  lambda_depth: 10.0      # [BOOST] 从 1.0 提升到 10.0，全力优化 Abs Err
+  # 1. 任务损失 (双高)
+  lambda_seg: 10.0
+  lambda_depth: 10.0      # [BOOST]
   lambda_normal: 0.0
   lambda_scene: 0.0
 
   # 2. 因果约束
-  lambda_independence: 0.05 # [KEEP] 维持现状
+  lambda_independence: 0.05
 
-  # 3. 重构损失
-  alpha_recon_geom: 2.0
-  beta_recon_app: 2.0
+  # 3. 重构损失 (全面降权)
+  alpha_recon_geom: 1.0   # [LOWER] 降低几何重构要求
+  beta_recon_app: 0.5     # [LOWER] 降低外观重构要求
   lambda_l1_recon: 1.0
 
   # 4. 辅助/边缘
-  alpha_recon_geom_aux: 0.5
-  beta_recon_app_aux: 0.5
-  lambda_depth_zp: 0.5
+  alpha_recon_geom_aux: 0.2
+  beta_recon_app_aux: 0.2
+  lambda_depth_zp: 0.2
 
   # 5. 分解正则化
-  lambda_img: 3.0         # [KEEP] 保持可视化质量
-  lambda_alb_tv: 0.01
-  lambda_alb_chroma: 0.01
-  lambda_sh_gray: 0.1
-  lambda_norm: 0.1
-  lambda_xcov: 0.05
+  lambda_img: 0.5         # [MINIMAL] 只保留最低限度的正则，不抢占梯度
+  lambda_alb_tv: 0.001
+  lambda_alb_chroma: 0.001
+  lambda_sh_gray: 0.01
+  lambda_norm: 0.01
+  lambda_xcov: 0.01

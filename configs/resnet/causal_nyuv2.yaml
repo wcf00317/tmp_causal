@@ -1,3 +1,7 @@
+# configs/resnet/causal_nyuv2_v5_depth_sota.yaml
+# V5 策略：在保持 Seg/Normal SOTA 的基础上，全力修复 Depth 短板
+
+# -- Data --
 data:
   type: "nyuv2"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
@@ -6,7 +10,7 @@ data:
   img_size: [384, 384]
   pin_memory: True
 
-# -- Model Parameters --
+# -- Model --
 model:
   type: "causal"
   encoder_name: "resnet50"
@@ -14,8 +18,8 @@ model:
   latent_dim_s: 128
   latent_dim_p: 256
   z_s_bottleneck_noise: 0.1
-  num_scene_classes: 1      # 占位
-  num_seg_classes: 40       # NYUv2 默认 40 类
+  num_scene_classes: 1
+  num_seg_classes: 40
   gating_scale_cap: 0.3
 
   decomposition:
@@ -26,49 +30,47 @@ model:
       sh_degree: 2
       grayscale_prior: true
 
-# -- Training Parameters --
+# -- Training --
 training:
-  seed: 0
-  epochs: 200 #00             # [Aligned] 对齐 LibMTL 标准时长
+  seed: 2025              # 新种子
+  epochs: 100             # 保持 200 以便充分收敛
   optimizer: "Adam"
   learning_rate: 0.0001
   weight_decay: 0.00001
   enable_training: True
 
-  # Causal 预热
   stage1_epochs: 20
   ind_warmup_epochs: 20
 
-  # [Scheduler] 在第 100 Epoch 衰减一次
   lr_scheduler:
-    type: "step"
-    step_size: 100
-    gamma: 0.5
-    warmup_epochs: 0
+    type: "cosine"
+    warmup_epochs: 5
+    min_lr_factor: 0.01
 
-# -- Loss Weights --
+# -- Losses (关键调整) --
 losses:
-  # === 1. 任务损失 ===
-  lambda_seg: 2.0         # [Boost] 稍微加大分割权重以提升 mIoU
-  lambda_depth: 1.0
-  lambda_normal: 1.0      # [CRITICAL FIX] 必须开启法线监督！
+  # 1. 任务损失 (非对称加权)
+  lambda_seg: 2.0         # [KEEP] 保持现状，稳住 mIoU
+  lambda_normal: 2.0      # [BOOST] 从 1.0 提至 2.0，巩固 Normal 优势
+  lambda_depth: 10.0      # [CRITICAL] 从 1.0 暴增至 10.0，强制模型关注 Depth L1 Loss
   lambda_scene: 0.0
 
-  # === 2. 因果约束 ===
-  lambda_independence: 0.05 # [Tuned] 适中权重，避免 CKA 过高或破坏特征
+  # 2. 因果约束
+  lambda_independence: 0.1 # [KEEP] V4 的设置证明有效
 
-  # === 3. 重构损失 (可视化清晰度的关键) ===
-  alpha_recon_geom: 10.0   # [HIGH] 强迫 z_s 学到锐利的几何结构
-  beta_recon_app: 10.0     # [HIGH] 强迫 z_p 学到清晰的纹理
+  # 3. 重构损失 (适度降权)
+  # [LOWER] 从 5.0 降至 2.0。V4 的 5.0 虽然让可视化清晰，但可能抢了深度的资源。
+  alpha_recon_geom: 2.0
+  beta_recon_app: 2.0
   lambda_l1_recon: 1.0
 
-  # === 4. 辅助/边缘 ===
-  alpha_recon_geom_aux: 1.0
-  beta_recon_app_aux: 1.0
+  # 4. 辅助
+  alpha_recon_geom_aux: 0.5
+  beta_recon_app_aux: 0.5
   lambda_depth_zp: 0.5
 
-  # === 5. 分解正则化 ===
-  lambda_img: 20.0        # [CRITICAL] 强力约束 Albedo*Shading=RGB，这是 Report 2 清晰的关键
+  # 5. 分解正则
+  lambda_img: 2.0         # [LOWER] 从 5.0 降至 2.0，给深度任务腾出梯度空间
   lambda_alb_tv: 0.01
   lambda_alb_chroma: 0.01
   lambda_sh_gray: 0.1

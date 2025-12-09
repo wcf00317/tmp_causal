@@ -310,7 +310,7 @@ class AdaptiveCompositeLoss(nn.Module):
         if stage == 1:
             loss_ind = torch.zeros_like(l_ind)
         else:
-            loss_ind = self._uw('ind', l_ind)
+            loss_ind = self.weights.get('lambda_independence', 0.05) * l_ind
 
 
 

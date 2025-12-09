@@ -192,10 +192,10 @@ def calculate_improvement(base_metrics, current_metrics):
 
 def train(model, train_loader, val_loader, optimizer, criterion, scheduler, config, device,
           checkpoint_dir='checkpoints'):
-    # 1. 提取 dataset_type
+    # 1. 提取 dataset_type (转小写以防万一)
     data_type = config['data'].get('type', 'nyuv2').lower()
 
-    # 2. 读取训练配置 (必须在 build_scheduler 之前)
+    # 2. 读取训练配置
     train_cfg = config['training']
     stage1_epochs = int(train_cfg.get('stage1_epochs', 10))
     total_epochs = int(train_cfg.get('epochs', 30))
@@ -204,6 +204,8 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
     # 3. 初始化基准变量
     best_relative_score = -float('inf')
     baseline_metrics = None
+    best_epoch = 0
+    best_metrics_details = {}
 
     # 构建调度器
     sched = _build_scheduler(optimizer, train_cfg)
@@ -233,7 +235,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, stage=stage)
 
         # --- Validate ---
-        val_metrics = evaluate(model, val_loader, criterion, device, stage=2)
+        val_metrics = evaluate(model, val_loader, criterion, device, stage=2,data_type=data_type)
 
         # --- Quick diagnose (Optional) ---
         if os.environ.get("QUICK_DIAG", "0") == "1" and (epoch == 0 or epoch == stage1_epochs):
@@ -263,13 +265,22 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
 
             if is_best:
                 best_relative_score = score
+                best_epoch = epoch + 1
+                best_metrics_details = val_metrics.copy()  # 保存最佳时刻的指标副本
                 logging.info(f"  -> 🏆 New best model found! Avg Improvement vs Epoch 0: {score:.2%}")
 
-                # [Dynamic Logging] 根据数据集类型打印相关指标
-                log_msg = f"     [Metrics] Seg mIoU: {val_metrics.get('seg_miou', 0):.4f} | Depth Abs: {val_metrics.get('depth_abs_err', 0):.4f}"
+                metrics_log = (
+                    f"     [Tasks] Seg: mIoU={val_metrics.get('seg_miou', 0):.4f} Acc={val_metrics.get('seg_pixel_acc', 0):.4f} | "
+                    f"Depth: Abs={val_metrics.get('depth_abs_err', 0):.4f} Rel={val_metrics.get('depth_rel_err', 0):.4f}"
+                )
+
+                # 法线 (Normal)：只在 NYUv2 下打印 (硬逻辑)
                 if 'nyuv2' in data_type:
-                    log_msg += f" | Normal Mean: {val_metrics.get('normal_mean_angle', 0):.2f}"
-                logging.info(log_msg)
+                    metrics_log += (
+                        f"\n     [Normal] Mean={val_metrics.get('normal_mean_angle', 0):.2f}° Med={val_metrics.get('normal_median_angle', 0):.2f}° | "
+                        f"Acc: 11°={val_metrics.get('normal_acc_11', 0):.3f} 22°={val_metrics.get('normal_acc_22', 0):.3f} 30°={val_metrics.get('normal_acc_30', 0):.3f}"
+                    )
+                logging.info(metrics_log)
 
         save_checkpoint({
             'epoch': epoch + 1,
@@ -278,5 +289,38 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
             'best_score': best_relative_score,
         }, is_best, checkpoint_dir=checkpoint_dir)
 
-    logging.info("\n----- Training Finished -----")
-    logging.info(f"Best model saved with Relative Score: {best_relative_score:.4f}")
+    # =========================================================
+    # [FINAL LOG] 训练结束时的详细总结 (已修复数据类型判断)
+    # =========================================================
+    logging.info("\n" + "=" * 60)
+    logging.info(f"🏆 Best Model Selection Summary (Epoch {best_epoch}):")
+    logging.info(f"   Relative Improvement vs Epoch 0: {best_relative_score:.2%}")
+    logging.info("-" * 60)
+    logging.info("-- Best Epoch Downstream Task Metrics --")
+
+    # 1. Segmentation (通用)
+    miou = best_metrics_details.get('seg_miou', 0.0)
+    pix_acc = best_metrics_details.get('seg_pixel_acc', 0.0)
+    logging.info(f"  - Segmentation: mIoU={miou:.4f}, Pixel Acc={pix_acc:.4f}")
+
+    # 2. Depth (通用)
+    abs_err = best_metrics_details.get('depth_abs_err', 0.0)
+    rel_err = best_metrics_details.get('depth_rel_err', 0.0)
+    logging.info(f"  - Depth:        Abs Err={abs_err:.4f}, Rel Err={rel_err:.4f}")
+
+    # 3. Normal (仅 NYUv2 输出)
+    if 'nyuv2' in data_type:
+        mean_ang = best_metrics_details.get('normal_mean_angle', 0.0)
+        med_ang = best_metrics_details.get('normal_median_angle', 0.0)
+        acc_11 = best_metrics_details.get('normal_acc_11', 0.0)
+        acc_22 = best_metrics_details.get('normal_acc_22', 0.0)
+        acc_30 = best_metrics_details.get('normal_acc_30', 0.0)
+        logging.info(f"  - Normal:       Mean Ang={mean_ang:.2f}°, Median Ang={med_ang:.2f}°")
+        logging.info(f"                  Acc@11.25°={acc_11:.4f}, Acc@22.5°={acc_22:.4f}, Acc@30°={acc_30:.4f}")
+
+    # 4. Scene (已废弃，注释掉)
+    # scene_acc = best_metrics_details.get('scene_acc', 1.0)
+    # if scene_acc != 1.0:
+    #     logging.info(f"  - Scene Classification (Acc): {scene_acc:.4f}")
+
+    logging.info("=" * 60 + "\n")
