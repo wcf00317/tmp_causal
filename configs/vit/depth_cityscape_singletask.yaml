@@ -1,0 +1,32 @@
+# configs/depth_cityscape_singletask.yaml
+
+data:
+  type: "cityscapes"
+  dataset_path: "../mtl_dataset/cityscapes"
+  batch_size: 8
+  num_workers: 4
+  img_size: [384, 384]
+  pin_memory: True
+
+model:
+  type: "single_task"
+  active_task: "depth"   # ★ 激活深度
+  encoder_name: "vit_b_16"
+  pretrained: True
+  num_scene_classes: 1
+
+training:
+  seed: 42
+  epochs: 100
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  lr_scheduler:
+    type: cosine
+    warmup_epochs: 3
+    min_lr_factor: 0.1
+
+losses:
+  lambda_seg: 0.0
+  lambda_depth: 5.0      # 只开启深度 Loss
+  lambda_scene: 0.0

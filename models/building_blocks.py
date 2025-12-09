@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 from torchvision.models.vision_transformer import VisionTransformer
-
+from torchvision.models import ResNet50_Weights
 
 class ViTEncoder(nn.Module):
     """
@@ -83,6 +83,53 @@ class ViTEncoder(nn.Module):
 
         # 返回特征列表，最后一层 features[-1] 即为最高层特征
         return features
+
+
+class ResNetEncoder(nn.Module):
+    """
+    ResNet50 Encoder wrapper adapted for CausalMTL.
+    Supports 'resnet_dilated' mode to align with LibMTL.
+    """
+
+    def __init__(self, name="resnet50", pretrained=True, dilated=True):
+        super().__init__()
+
+        # 1. 加载标准 ResNet50
+        # LibMTL 使用 resnet_dilated，通常意味着最后一块使用空洞卷积
+        # replace_stride_with_dilation=[False, False, True] 会让 Layer4 的 Stride=1, Dilation=2
+        # 这样输出的特征图尺寸是 1/16 (OS=16)，比标准的 1/32 更适合密集预测
+        replace_stride = [False, False, True] if dilated else [False, False, False]
+
+        weights = ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
+        self.backbone = models.resnet50(
+            weights=weights,
+            replace_stride_with_dilation=replace_stride
+        )
+
+        # 记录各层通道数，用于后续 Adapter
+        self.feature_dims = [256, 512, 1024, 2048]
+
+        # 移除 FC 层和 AvgPool，只保留特征提取部分
+        self.stem = nn.Sequential(
+            self.backbone.conv1,
+            self.backbone.bn1,
+            self.backbone.relu,
+            self.backbone.maxpool
+        )
+        self.layer1 = self.backbone.layer1  # 1/4
+        self.layer2 = self.backbone.layer2  # 1/8
+        self.layer3 = self.backbone.layer3  # 1/16
+        self.layer4 = self.backbone.layer4  # 1/16 (if dilated) else 1/32
+
+    def forward(self, x):
+        x = self.stem(x)
+        c1 = self.layer1(x)
+        c2 = self.layer2(c1)
+        c3 = self.layer3(c2)
+        c4 = self.layer4(c3)
+        # 返回多尺度特征列表
+        return [c1, c2, c3, c4]
+
 class MLP(nn.Module):
     # ... (Code from above, no changes needed here)
     """

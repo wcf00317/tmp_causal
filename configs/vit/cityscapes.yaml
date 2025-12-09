@@ -1,0 +1,93 @@
+# configs/cityscapes.yaml
+
+# -- Data Parameters --
+data:
+  type: "cityscapes"
+  dataset_path: "../mtl_dataset/cityscapes" # 您的实际路径
+  batch_size: 8       # Cityscapes 图片大，如果显存够大可设 8，不够改 4
+  num_workers: 4
+  img_size: [384, 384] # 保持高分辨率以捕捉细节
+  pin_memory: True
+
+# -- Model Parameters --
+model:
+  encoder_name: "vit_b_16"
+  pretrained: True
+  latent_dim_s: 384
+  latent_dim_p: 768
+  z_s_bottleneck_noise: 0.1
+  num_scene_classes: 1 # Cityscapes 只有一个大类 "Driving" (或者按城市分，这里简化为1)
+
+  gating_scale_cap: 0.3
+
+    # ★新增：配置本征分解头 (Albedo/Normal/Light)
+  decomposition:
+    enabled: true
+    normal_head_hidden: 128
+    albedo_head_hidden: 128
+    light_head:
+      sh_degree: 2          # 二阶球谐
+      grayscale_prior: true
+
+# -- Training Parameters --
+training:
+  seed: 42
+  epochs: 100 #75          # Cityscapes 数据量大，多训一会
+  optimizer: "AdamW"
+  learning_rate: 0.00001 # Base LR (Encoder 1e-5, Decoder 1e-4)
+  weight_decay: 0.01
+  enable_training: True
+  stage1_epochs: 10    # 冻结 Encoder 的预热期
+
+  stage0_epochs: 5
+
+    # ★新增：独立性约束的 Warmup
+    # 让 CKA 约束慢慢变强，不要上来就强行把特征扯开
+  ind_warmup_epochs: 10
+
+
+    # ★新增：等变/不变性占位符 (代码需要读取)
+  lambda_equiv: 0.0
+  lambda_invar: 0.0
+
+    # ★新增：学习率调度器 (Cosine Annealing)
+    # 比固定的 LR 效果更好，能收敛到更优解
+  lr_scheduler:
+    type: cosine
+    warmup_epochs: 3
+    min_lr_factor: 0.1
+
+# -- Loss Weights --
+losses:
+  # 任务损失
+  lambda_seg: 10.0
+  lambda_depth: 5.0   # 开启深度监督（因为您下载了 disparity）
+  lambda_scene: 0.0   # 关闭场景分类（因为只有一个类，没法训）
+
+  # 因果解耦
+  lambda_independence: 0.1 #0.01
+
+  # 重构损失
+  alpha_recon_geom: 1.0     # z_s -> depth
+  beta_recon_app: 3.0 #0.5       # z_p -> RGB
+  lambda_l1_recon: 3.0
+  alpha_recon_geom_aux: 0.5
+  beta_recon_app_aux: 2.5
+  lambda_depth_zp: 1.0
+
+  # 边缘一致性
+  lambda_depth_edge_weight_alpha: 2.0
+  lambda_depth_edge_weight_q: 0.7      # 选取梯度最大的 30% 像素加强监督
+  lambda_depth_edge_weight_mix: 0.5    # 混合普通 L1 和边缘加权 L1
+  lambda_edge_consistency: 0.5
+  alpha_recon_geom_edges: 0.5
+  beta_seg_edge_from_geom: 0.0 # 暂时关闭，先跑通主干
+  lambda_main_depth_edge: 4.0
+
+  lambda_img: 1.0               # I_hat(A×S) 与目标图的 L1（线性色域）
+  lambda_alb_tv: 0.01           # 反照率 TV 平滑
+  lambda_alb_chroma: 0.01       # 反照率的色度平滑（Lab 的 ab；无 kornia 时退化为 RGB TV）
+  lambda_sh_gray: 0.1           # Shading 近灰约束
+  lambda_norm: 0.1              # 法线单位长度 + TV
+  lambda_xcov: 0.05             # Albedo 与 Normal 的交叉协方差（解耦泄漏抑制）
+

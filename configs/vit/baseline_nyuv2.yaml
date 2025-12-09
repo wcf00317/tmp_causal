@@ -1,0 +1,38 @@
+# configs/baseline_nyuv2.yaml
+
+# -- Data Parameters --
+data:
+  type: "nyuv2"
+  dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyu_depth_v2_labeled.mat"
+  batch_size: 8
+  num_workers: 8
+  img_size: [384, 384]
+
+# -- Model Parameters --
+model:
+  type: "raw_mtl"        # 标识符，用于 main.py 判断
+  encoder_name: "vit_b_16"
+  pretrained: True
+  num_scene_classes: 27
+
+# -- Training Parameters --
+training:
+  seed: 42
+  epochs: 50
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+
+  # Baseline 策略开关
+  strategy: "fixed"      # options: "fixed", "uncertainty", "gradnorm" (未来实现)
+
+  lr_scheduler:
+    type: cosine
+    warmup_epochs: 3
+    min_lr_factor: 0.1
+
+# -- Loss Weights (for Fixed strategy) --
+losses:
+  lambda_seg: 10.0
+  lambda_depth: 5.0
+  lambda_scene: 5.0

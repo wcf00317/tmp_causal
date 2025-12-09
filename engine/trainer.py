@@ -2,6 +2,7 @@ import torch
 from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from tqdm import tqdm
 import os, logging
+import numpy as np  # 必需导入
 from .evaluator import evaluate
 from utils.general_utils import save_checkpoint
 
@@ -15,28 +16,51 @@ def _set_requires_grad(module, requires_grad: bool):
     for p in module.parameters():
         p.requires_grad = requires_grad
 
+
 def _switch_stage_freeze(model, stage: int):
     """
     stage=1: 冻结 z_p 相关分支（私有投影/残差），只训练 z_s 与主干。
     stage=2: 全部解冻。
     """
+    # 检查模型是否有这些属性（兼容 RawMTL）
+    if not hasattr(model, 'projector_p_seg') or model.projector_p_seg is None:
+        return
+
     if stage == 1:
-        _set_requires_grad(model.projector_p_seg,      False)
-        _set_requires_grad(model.projector_p_depth,    False)
-        _set_requires_grad(model.proj_z_p_seg,         False)
-        _set_requires_grad(model.proj_z_p_depth,       False)
-        _set_requires_grad(model.zp_seg_refiner,       False)
-        _set_requires_grad(model.zp_depth_refiner,     False)
-        _set_requires_grad(model.decoder_zp_depth,     False)
-        logging.info("Stage-1: frozen private (z_p) branches.")
+        # [Freeze] 设为 False
+        _set_requires_grad(model.projector_p_seg, False)
+        _set_requires_grad(model.projector_p_depth, False)
+        _set_requires_grad(getattr(model, 'projector_p_normal', None), False)  # [Added]
+
+        _set_requires_grad(model.proj_z_p_seg, False)
+        _set_requires_grad(model.proj_z_p_depth, False)
+        _set_requires_grad(getattr(model, 'proj_z_p_normal', None), False)  # [Added]
+
+        _set_requires_grad(model.zp_seg_refiner, False)
+        _set_requires_grad(model.zp_depth_refiner, False)
+        _set_requires_grad(getattr(model, 'zp_normal_refiner', None), False)  # [Added]
+
+        _set_requires_grad(model.decoder_zp_depth, False)
+        _set_requires_grad(getattr(model, 'decoder_zp_normal', None), False)  # [Added]
+
+        logging.info("Stage-1: frozen private (z_p) branches (Seg, Depth, Normal).")
     else:
-        _set_requires_grad(model.projector_p_seg,      True)
-        _set_requires_grad(model.projector_p_depth,    True)
-        _set_requires_grad(model.proj_z_p_seg,         True)
-        _set_requires_grad(model.proj_z_p_depth,       True)
-        _set_requires_grad(model.zp_seg_refiner,       True)
-        _set_requires_grad(model.zp_depth_refiner,     True)
-        _set_requires_grad(model.decoder_zp_depth,     True)
+        # [Unfreeze] 必须全部设为 True，否则 Stage 2 无法训练！
+        _set_requires_grad(model.projector_p_seg, True)
+        _set_requires_grad(model.projector_p_depth, True)
+        _set_requires_grad(getattr(model, 'projector_p_normal', None), True)  # [Added]
+
+        _set_requires_grad(model.proj_z_p_seg, True)
+        _set_requires_grad(model.proj_z_p_depth, True)
+        _set_requires_grad(getattr(model, 'proj_z_p_normal', None), True)  # [Added]
+
+        _set_requires_grad(model.zp_seg_refiner, True)
+        _set_requires_grad(model.zp_depth_refiner, True)
+        _set_requires_grad(getattr(model, 'zp_normal_refiner', None), True)  # [Added]
+
+        _set_requires_grad(model.decoder_zp_depth, True)
+        _set_requires_grad(getattr(model, 'decoder_zp_normal', None), True)  # [Added]
+
         logging.info("Stage-2: unfrozen private (z_p) branches.")
 
 
@@ -44,20 +68,15 @@ def _get_lr(optimizer):
     for pg in optimizer.param_groups:
         return pg.get("lr", None)
 
+
 def _set_lr(optimizer, lr):
     for pg in optimizer.param_groups:
         pg["lr"] = lr
 
+
 def _build_scheduler(optimizer, train_cfg):
     """
-    读取 config['training'] 下的 lr_scheduler 配置：
-      lr_scheduler:
-        type: "cosine" | "step"          # 默认 cosine
-        warmup_epochs: 3                 # 仅对 cosine 生效（线性 warm-up）
-        min_lr_factor: 0.1               # eta_min = base_lr * min_lr_factor
-        T_max: <int>                     # 可选；默认 = epochs - warmup_epochs
-        step_size: 10                    # 仅对 step 生效
-        gamma: 0.5                       # 仅对 step 生效
+    自动构建调度器：Cosine 或 Step
     """
     base_lr = float(train_cfg.get("learning_rate", 1e-4))
     sched_cfg = train_cfg.get("lr_scheduler", {}) or {}
@@ -66,8 +85,7 @@ def _build_scheduler(optimizer, train_cfg):
     if sched_type == "cosine":
         warmup_epochs = int(sched_cfg.get("warmup_epochs", 3))
         min_lr_factor = float(sched_cfg.get("min_lr_factor", 0.1))
-        total_epochs  = int(train_cfg.get("epochs", 30))
-        # 余弦部分的 T_max（排除 warmup）
+        total_epochs = int(train_cfg.get("epochs", 30))
         t_max = int(sched_cfg.get("T_max", max(1, total_epochs - warmup_epochs)))
         cosine = CosineAnnealingLR(
             optimizer,
@@ -81,9 +99,9 @@ def _build_scheduler(optimizer, train_cfg):
             "cosine": cosine
         }
 
-    # fallback: StepLR
-    step_size = int(sched_cfg.get("step_size", 10))
-    gamma     = float(sched_cfg.get("gamma", 0.5))
+    # fallback: StepLR (LibMTL 默认使用这个)
+    step_size = int(sched_cfg.get("step_size", 100))
+    gamma = float(sched_cfg.get("gamma", 0.5))
     step = StepLR(optimizer, step_size=step_size, gamma=gamma)
     return {
         "type": "step",
@@ -99,18 +117,15 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
     total_train_loss = 0.0
     pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Training]", leave=False)
 
-    # 物理 BS=4，累积 8次 = 逻辑 BS 32
-    accumulation_steps = 8
+    # 梯度累积步数 (物理 BS=8 -> 逻辑 BS=16/32, 视显存而定)
+    # 如果不需要累积，设为 1
+    accumulation_steps = 1
 
-    # 1. 在循环外先清空一次梯度
     optimizer.zero_grad(set_to_none=True)
 
     for i, batch in enumerate(pbar):
         batch = {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
         rgb = batch['rgb']
-
-        # ❌ 删除这行！不要在每次微步都清空！
-        # optimizer.zero_grad(set_to_none=True)
 
         outputs = model(rgb, stage=stage)
 
@@ -125,21 +140,17 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
         else:
             raise ValueError("criterion must return dict or (total_loss, dict).")
 
-        # Loss 归一化，使得 8 次累加后的梯度幅值等效于一次大 Batch
         loss_normalized = total_loss / accumulation_steps
         loss_normalized.backward()
 
-        # --- 梯度累积逻辑 ---
-        # 只有达到累积步数时，才更新参数并清空梯度
         if (i + 1) % accumulation_steps == 0:
             optimizer.step()
-            optimizer.zero_grad(set_to_none=True) # 更新完才清空！
+            optimizer.zero_grad(set_to_none=True)
 
         total_train_loss += float(total_loss.item())
         pbar.set_postfix(loss=f"{total_loss.item():.4f}")
 
-    # --- 【新增】处理循环结束时剩下的“尾巴” ---
-    # 如果总 batch 数不是 8 的倍数，最后积累的梯度也需要更新一次
+    # 处理剩余梯度
     if len(train_loader) % accumulation_steps != 0:
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
@@ -148,39 +159,70 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
     logging.info(f"Epoch {epoch + 1} - Average Training Loss: {avg_train_loss:.4f}")
     return avg_train_loss
 
-def train(model, train_loader, val_loader, optimizer, criterion, scheduler, config, device, checkpoint_dir='checkpoints'):
-    """
-    注意：为了更好地控制 Cosine + warm-up，这里会忽略传入的 `scheduler`，
-    统一根据 config['training']['lr_scheduler'] 在本函数内部创建与推进调度器。
-    这样你无需修改 main.py。
-    """
-    best_val_metric = float('inf')
+
+def calculate_improvement(base_metrics, current_metrics):
+    """相对提升率计算 (LibMTL 对齐)"""
+    improvement = 0
+    count = 0
+    # 定义指标方向: 1=越大越好, 0=越小越好
+    metric_meta = {
+        'seg_miou': 1, 'seg_pixel_acc': 1,
+        'depth_abs_err': 0, 'depth_rel_err': 0,
+        'normal_mean_angle': 0, 'normal_acc_30': 1,
+        'normal_median_angle': 0, 'normal_acc_11': 1, 'normal_acc_22': 1
+    }
+
+    for k, direction in metric_meta.items():
+        if k in base_metrics and k in current_metrics:
+            base = base_metrics[k]
+            curr = current_metrics[k]
+            if base == 0: continue
+
+            # 越小越好时：(Base - Curr) / Base
+            # 越大越好时：(Curr - Base) / Base
+            if direction == 1:
+                imp = (curr - base) / base
+            else:
+                imp = (base - curr) / base
+            improvement += imp
+            count += 1
+
+    return improvement / max(1, count)
+
+
+def train(model, train_loader, val_loader, optimizer, criterion, scheduler, config, device,
+          checkpoint_dir='checkpoints'):
+    # 1. 提取 dataset_type
+    data_type = config['data'].get('type', 'nyuv2').lower()
+
+    # 2. 读取训练配置 (必须在 build_scheduler 之前)
     train_cfg = config['training']
     stage1_epochs = int(train_cfg.get('stage1_epochs', 10))
-
-    # 构建调度器（默认 cosine + 线性 warmup）
-    sched = _build_scheduler(optimizer, train_cfg)
-    logging.info(f"[LR Scheduler] {sched['type']}; base_lr={train_cfg.get('learning_rate', 1e-4)}")
-
     total_epochs = int(train_cfg.get('epochs', 30))
     base_lr = float(train_cfg.get("learning_rate", 1e-4))
+
+    # 3. 初始化基准变量
+    best_relative_score = -float('inf')
+    baseline_metrics = None
+
+    # 构建调度器
+    sched = _build_scheduler(optimizer, train_cfg)
+    logging.info(f"[LR Scheduler] {sched['type']}; base_lr={base_lr}")
 
     for epoch in range(total_epochs):
         stage = 1 if epoch < stage1_epochs else 2
         if epoch == 0 or epoch == stage1_epochs:
             _switch_stage_freeze(model, stage)
 
-        # ---- Warm-up（仅 cosine 时生效）----
+        # ---- Warm-up (Cosine only) ----
         if sched["type"] == "cosine":
             warmup_epochs = sched["warmup_epochs"]
             if epoch < warmup_epochs:
-                # 线性从 10%*base_lr -> base_lr
                 warmup_start = 0.1 * base_lr
                 ratio = float(epoch + 1) / float(max(1, warmup_epochs))
                 lr_now = warmup_start + (base_lr - warmup_start) * ratio
                 _set_lr(optimizer, lr_now)
             else:
-                # 确保进入余弦阶段前把 lr 设回 base_lr（第一步会立刻被 cosine 调度）
                 if abs(_get_lr(optimizer) - base_lr) > 1e-12 and epoch == warmup_epochs:
                     _set_lr(optimizer, base_lr)
 
@@ -190,35 +232,51 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
         # --- Train ---
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, stage=stage)
 
-        # --- Validate（验证阶段一律 stage=2）---
+        # --- Validate ---
         val_metrics = evaluate(model, val_loader, criterion, device, stage=2)
 
-        # Quick diagnose（按需）
+        # --- Quick diagnose (Optional) ---
         if os.environ.get("QUICK_DIAG", "0") == "1" and (epoch == 0 or epoch == stage1_epochs):
             from engine.evaluator import quick_diagnose
             quick_diagnose(model, val_loader, device)
 
         # --- Step Scheduler ---
         if sched["type"] == "cosine":
-            warmup_epochs = sched["warmup_epochs"]
-            if epoch >= warmup_epochs:
+            if epoch >= sched["warmup_epochs"]:
                 sched["cosine"].step()
         else:
-            # StepLR
             sched["step"].step()
 
-        # --- Checkpoint ---
-        is_best = val_metrics['depth_rmse'] < best_val_metric
-        if is_best:
-            best_val_metric = val_metrics['depth_rmse']
-            logging.info(f"  -> New best model found with Depth RMSE: {best_val_metric:.4f}")
+        # --- Best Model Selection Logic (LibMTL Aligned) ---
+        is_best = False
+
+        if epoch == 0:
+            # Epoch 0 作为基准线
+            baseline_metrics = val_metrics
+            is_best = True
+            best_relative_score = 0.0
+            logging.info("  -> Epoch 0 set as Baseline for improvement calculation.")
+        else:
+            # 计算相对于 Epoch 0 的提升
+            score = calculate_improvement(baseline_metrics, val_metrics)
+            is_best = (score > best_relative_score)
+
+            if is_best:
+                best_relative_score = score
+                logging.info(f"  -> 🏆 New best model found! Avg Improvement vs Epoch 0: {score:.2%}")
+
+                # [Dynamic Logging] 根据数据集类型打印相关指标
+                log_msg = f"     [Metrics] Seg mIoU: {val_metrics.get('seg_miou', 0):.4f} | Depth Abs: {val_metrics.get('depth_abs_err', 0):.4f}"
+                if 'nyuv2' in data_type:
+                    log_msg += f" | Normal Mean: {val_metrics.get('normal_mean_angle', 0):.2f}"
+                logging.info(log_msg)
 
         save_checkpoint({
             'epoch': epoch + 1,
             'state_dict': model.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'best_val_metric': best_val_metric,
+            'best_score': best_relative_score,
         }, is_best, checkpoint_dir=checkpoint_dir)
 
     logging.info("\n----- Training Finished -----")
-    logging.info(f"Best model saved with Depth RMSE: {best_val_metric:.4f}")
+    logging.info(f"Best model saved with Relative Score: {best_relative_score:.4f}")

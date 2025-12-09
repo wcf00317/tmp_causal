@@ -1,0 +1,81 @@
+# configs/resnet/causal_nyuv2_v4_cosine.yaml
+# V4 对照组：使用 Cosine 调度 + 平衡权重 + 增强解耦
+
+# -- Data Parameters --
+data:
+  type: "nyuv2"
+  dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
+  batch_size: 8
+  num_workers: 4
+  img_size: [384, 384]
+  pin_memory: True
+
+# -- Model Parameters --
+model:
+  type: "causal"
+  encoder_name: "resnet50"
+  pretrained: True
+  latent_dim_s: 128
+  latent_dim_p: 256
+  z_s_bottleneck_noise: 0.1
+  num_scene_classes: 1
+  num_seg_classes: 40       # NYUv2 40类
+  gating_scale_cap: 0.3
+
+  decomposition:
+    enabled: true
+    normal_head_hidden: 128
+    albedo_head_hidden: 128
+    light_head:
+      sh_degree: 2
+      grayscale_prior: true
+
+# -- Training Parameters --
+training:
+  seed: 1                 # [DIFF] 改个种子，增加实验可信度
+  epochs: 200
+  optimizer: "Adam"
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  enable_training: True
+
+  # 预热保持一致
+  stage1_epochs: 20
+  ind_warmup_epochs: 20
+
+  # [DIFF] 策略核心：使用 Cosine Annealing 调度器
+  # 通常能比 StepLR 获得更好的最终精度
+  lr_scheduler:
+    type: "cosine"
+    warmup_epochs: 5        # 这里的 warmup 是针对 LR 的，独立于 ind_warmup
+    min_lr_factor: 0.01     # 最后降到 1e-6
+
+# -- Loss Weights --
+losses:
+  # === 1. 任务损失 ===
+  lambda_seg: 2.0         # 保持加强
+  lambda_depth: 1.0
+  lambda_normal: 1.0
+  lambda_scene: 0.0
+
+  # === 2. 因果约束 (A/B Test) ===
+  lambda_independence: 0.1 # [DIFF] V3是0.05。这里尝试加强约束，看能否压低 CKA
+
+  # === 3. 重构损失 (A/B Test) ===
+  # [DIFF] 相比 V3 的 10.0，这里回调到 5.0，更加温和
+  alpha_recon_geom: 5.0
+  beta_recon_app: 5.0
+  lambda_l1_recon: 1.0
+
+  # === 4. 辅助/边缘 ===
+  alpha_recon_geom_aux: 1.0
+  beta_recon_app_aux: 1.0
+  lambda_depth_zp: 0.5
+
+  # === 5. 分解正则化 ===
+  lambda_img: 5.0         # [DIFF] V3是20.0。这里设为 5.0，平衡清晰度与主任务梯度
+  lambda_alb_tv: 0.01
+  lambda_alb_chroma: 0.01
+  lambda_sh_gray: 0.1
+  lambda_norm: 0.1
+  lambda_xcov: 0.05

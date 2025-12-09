@@ -1,0 +1,80 @@
+# configs/resnet/causal_cityscapes_v2.yaml
+# V2 升级版：针对 Stage 2 震荡进行稳定性优化
+
+# -- Data Parameters --
+data:
+  type: "cityscapes"
+  dataset_path: "/data/chengfengwu/alrl/mtl_dataset/cityscape_preprocess"
+  batch_size: 16
+  num_workers: 4
+  img_size: [128, 256]
+  pin_memory: True
+
+# -- Model Parameters --
+model:
+  type: "causal"
+  encoder_name: "resnet50"
+  pretrained: True
+  latent_dim_s: 128
+  latent_dim_p: 256
+  z_s_bottleneck_noise: 0.1
+  num_scene_classes: 1
+  num_seg_classes: 19
+  gating_scale_cap: 0.3
+
+  decomposition:
+    enabled: true
+    normal_head_hidden: 128
+    albedo_head_hidden: 128
+    light_head:
+      sh_degree: 2
+      grayscale_prior: true
+
+# -- Training Parameters --
+training:
+  seed: 0
+  epochs: 200 #100
+  optimizer: "Adam"
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  enable_training: True
+
+  # 保持预热设置
+  stage1_epochs: 20
+  ind_warmup_epochs: 20
+
+  # [CRITICAL UPDATE] 引入 LR 衰减，抑制 Stage 2 震荡
+  lr_scheduler:
+    type: "step"
+    step_size: 30       # 每 30 个 Epoch 衰减一次
+    gamma: 0.5          # 每次减半 (1e-4 -> 5e-5 -> 2.5e-5)
+    warmup_epochs: 0
+
+# -- Loss Weights --
+losses:
+  # === 1. 任务损失 (平衡策略) ===
+  lambda_seg: 5.0         # [Balanced] 比 1.0 强，但远小于 20.0，保护深度
+  lambda_depth: 1.0
+  lambda_normal: 0.0
+  lambda_scene: 0.0
+
+  # === 2. 因果约束 (大幅降低) ===
+  lambda_independence: 0.01 # [LOWERED] 从 0.1 降到 0.01，防止干扰 ResNet 特征学习
+
+  # === 3. 重构 (保持高权重以保证可视化清晰) ===
+  alpha_recon_geom: 2.0
+  beta_recon_app: 5.0
+  lambda_l1_recon: 1.0
+
+  # === 4. 辅助/边缘 ===
+  alpha_recon_geom_aux: 0.5
+  beta_recon_app_aux: 0.5
+  lambda_depth_zp: 0.5
+
+  # === 5. 分解正则化 ===
+  lambda_img: 10.0        # [HIGH] 强力约束 RGB 重构，解决可视化模糊
+  lambda_alb_tv: 0.01
+  lambda_alb_chroma: 0.01
+  lambda_sh_gray: 0.1
+  lambda_norm: 0.1
+  lambda_xcov: 0.05

@@ -1,0 +1,76 @@
+data:
+  type: "nyuv2"
+  dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
+  batch_size: 8
+  num_workers: 4
+  img_size: [384, 384]
+  pin_memory: True
+
+# -- Model Parameters --
+model:
+  type: "causal"
+  encoder_name: "resnet50"
+  pretrained: True
+  latent_dim_s: 128
+  latent_dim_p: 256
+  z_s_bottleneck_noise: 0.1
+  num_scene_classes: 1      # 占位
+  num_seg_classes: 40       # NYUv2 默认 40 类
+  gating_scale_cap: 0.3
+
+  decomposition:
+    enabled: true
+    normal_head_hidden: 128
+    albedo_head_hidden: 128
+    light_head:
+      sh_degree: 2
+      grayscale_prior: true
+
+# -- Training Parameters --
+training:
+  seed: 0
+  epochs: 200 #00             # [Aligned] 对齐 LibMTL 标准时长
+  optimizer: "Adam"
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  enable_training: True
+
+  # Causal 预热
+  stage1_epochs: 20
+  ind_warmup_epochs: 20
+
+  # [Scheduler] 在第 100 Epoch 衰减一次
+  lr_scheduler:
+    type: "step"
+    step_size: 100
+    gamma: 0.5
+    warmup_epochs: 0
+
+# -- Loss Weights --
+losses:
+  # === 1. 任务损失 ===
+  lambda_seg: 2.0         # [Boost] 稍微加大分割权重以提升 mIoU
+  lambda_depth: 1.0
+  lambda_normal: 1.0      # [CRITICAL FIX] 必须开启法线监督！
+  lambda_scene: 0.0
+
+  # === 2. 因果约束 ===
+  lambda_independence: 0.05 # [Tuned] 适中权重，避免 CKA 过高或破坏特征
+
+  # === 3. 重构损失 (可视化清晰度的关键) ===
+  alpha_recon_geom: 10.0   # [HIGH] 强迫 z_s 学到锐利的几何结构
+  beta_recon_app: 10.0     # [HIGH] 强迫 z_p 学到清晰的纹理
+  lambda_l1_recon: 1.0
+
+  # === 4. 辅助/边缘 ===
+  alpha_recon_geom_aux: 1.0
+  beta_recon_app_aux: 1.0
+  lambda_depth_zp: 0.5
+
+  # === 5. 分解正则化 ===
+  lambda_img: 20.0        # [CRITICAL] 强力约束 Albedo*Shading=RGB，这是 Report 2 清晰的关键
+  lambda_alb_tv: 0.01
+  lambda_alb_chroma: 0.01
+  lambda_sh_gray: 0.1
+  lambda_norm: 0.1
+  lambda_xcov: 0.05

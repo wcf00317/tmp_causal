@@ -1,5 +1,5 @@
 # 文件: engine/evaluator.py
-# 版本：【已升级，增加可视化指标监控 + 稳健 quick_diagnose】
+# 版本：【LibMTL NYUv2 Alignment Version - Fixed Ignore Index (-1)】
 
 import os
 import logging
@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 import torchmetrics
 from tqdm import tqdm
+import numpy as np
 
 
 @torch.no_grad()
@@ -20,21 +21,23 @@ def evaluate(model, val_loader, criterion, device, stage):
     num_seg_classes = model.predictor_seg.output_channels
     num_scene_classes = model.predictor_scene.out_features
 
+    # [FIXED] 将 ignore_index 从 255 改为 -1，以匹配 LibMTL 数据格式
     miou_metric = torchmetrics.classification.MulticlassJaccardIndex(
-        num_classes=num_seg_classes, ignore_index=255).to(device)
+        num_classes=num_seg_classes, ignore_index=-1).to(device)
+
     pixel_acc_metric = torchmetrics.classification.MulticlassAccuracy(
-        num_classes=num_seg_classes, average='micro', ignore_index=255).to(device)
+        num_classes=num_seg_classes, average='micro', ignore_index=-1).to(device)
+
     if num_scene_classes > 1:
         scene_acc_metric = torchmetrics.classification.MulticlassAccuracy(
             num_classes=num_scene_classes).to(device)
     else:
         scene_acc_metric = None  # 标记为 None
-    depth_mse_metric = torchmetrics.regression.MeanSquaredError().to(device)
-    depth_mae_metric = torchmetrics.regression.MeanAbsoluteError().to(device)
 
+    # [MODIFIED]: 使用自定义的 LibMTL 指标
+    depth_metric = DepthMetric().to(device)
+    normal_metric = NormalMetric().to(device)
 
-    total_abs_rel = 0.0
-    total_valid_depth_pixels = 0
     # --- 2. 跟踪损失 ---
     total_val_loss = 0.0
     total_recon_geom_loss = 0.0
@@ -67,43 +70,17 @@ def evaluate(model, val_loader, criterion, device, stage):
         total_cka_scene += loss_dict.get('cka_scene', torch.tensor(0.0)).item()
 
         miou_metric.update(outputs['pred_seg'], targets_on_device['segmentation'])
-        pixel_acc_metric.update(outputs['pred_seg'], targets_on_device['segmentation'])  # ★更新 Pixel Acc
+        pixel_acc_metric.update(outputs['pred_seg'], targets_on_device['segmentation'])
         if scene_acc_metric is not None:
             scene_acc_metric.update(outputs['pred_scene'], targets_on_device['scene_type'])
-        pred_disp = outputs['pred_depth']
 
-        # 准备变量：p_valid (预测), g_valid (GT)
-        p_valid, g_valid = None, None
+        # [NEW]: 法线指标更新
+        if 'normal' in targets_on_device and 'normals' in outputs:
+            normal_metric.update(outputs['normals'], targets_on_device['normal'])
 
-        if 'depth_meters' in targets_on_device:
-            # Cityscapes 物理深度逻辑
-            gt_depth_meters = targets_on_device['depth_meters']
-            pred_depth_meters = 1.85 / torch.clamp(pred_disp, min=1e-4)
-
-            # 严格筛选 0 < GT < 80m
-            valid_mask = (gt_depth_meters > 1e-3) & (gt_depth_meters <= 80.0)
-
-            if valid_mask.sum() > 0:
-                p_valid = torch.clamp(pred_depth_meters[valid_mask], 0, 80)
-                g_valid = gt_depth_meters[valid_mask]
-        else:
-            # NYUv2 逻辑
-            # 注意：NYUv2 原始数据也可能有 0 值，必须过滤！
-            gt_depth = targets_on_device['depth']
-            valid_mask = gt_depth > 1e-3  # ★ 关键：过滤 0 值
-
-            if valid_mask.sum() > 0:
-                p_valid = pred_disp[valid_mask]
-                g_valid = gt_depth[valid_mask]
-        if p_valid is not None and g_valid is not None:
-            depth_mse_metric.update(p_valid, g_valid)
-            depth_mae_metric.update(p_valid, g_valid)
-
-            # ★ 手动计算 Abs Rel: sum(|pred - gt| / gt)
-            # 因为 g_valid 已经过滤了 > 1e-3，做分母是安全的
-            abs_rel_sum = (torch.abs(p_valid - g_valid) / g_valid).sum().item()
-            total_abs_rel += abs_rel_sum
-            total_valid_depth_pixels += p_valid.numel()
+        # [MODIFIED]: 深度指标更新
+        if 'depth' in targets_on_device:
+            depth_metric.update(outputs['pred_depth'], targets_on_device['depth'])
 
     # --- 5. 平均 ---
     num_batches = max(1, len(val_loader))
@@ -125,12 +102,12 @@ def evaluate(model, val_loader, criterion, device, stage):
         scene_acc_metric.reset()
     else:
         final_scene_acc = 1.0
-    final_rmse = torch.sqrt(depth_mse_metric.compute()).item()
-    final_mae = depth_mae_metric.compute().item()
-    if total_valid_depth_pixels > 0:
-        final_abs_rel = total_abs_rel / total_valid_depth_pixels
-    else:
-        final_abs_rel = 0.0
+
+    # [MODIFIED]: 深度指标
+    final_abs_err, final_rel_err = depth_metric.compute()
+
+    # [NEW]: 法线指标
+    mean_angle, median_angle, acc_11, acc_22, acc_30 = normal_metric.compute()
 
     # --- 7. 打印报告 ---
     logging.info("\n--- Validation Results ---")
@@ -144,7 +121,14 @@ def evaluate(model, val_loader, criterion, device, stage):
     logging.info(f"  - Appearance Recon Loss: {avg_recon_app_loss:.4f}  <-- 外观清晰度指标")
     logging.info("\n-- Downstream Task Metrics --")
     logging.info(f"  - Segmentation: mIoU={final_miou:.4f}, Pixel Acc={final_pixel_acc:.4f}")
-    logging.info(f"  - Depth:        RMSE={final_rmse:.4f}, MAE={final_mae:.4f}, Abs Rel={final_abs_rel:.4f}")
+
+    # [MODIFIED]: 深度指标报告
+    logging.info(f"  - Depth:        Abs Err={final_abs_err:.4f}, Rel Err={final_rel_err:.4f}")
+
+    # [NEW]: 法线指标报告
+    logging.info(f"  - Normal:       Mean Ang={mean_angle:.2f}°, Median Ang={median_angle:.2f}°")
+    logging.info(f"                  Acc@11.25°={acc_11:.4f}, Acc@22.5°={acc_22:.4f}, Acc@30°={acc_30:.4f}")
+
     if scene_acc_metric is not None:
         logging.info(f"  - Scene Classification (Acc): {final_scene_acc:.4f}")
     else:
@@ -154,29 +138,33 @@ def evaluate(model, val_loader, criterion, device, stage):
     miou_metric.reset()
     if scene_acc_metric is not None:
         scene_acc_metric.reset()
-    depth_mse_metric.reset()
-    depth_mae_metric.reset()
+    depth_metric.reset()
+    normal_metric.reset()
 
+    # [CORRECTED RETURN]: 返回所有 LibMTL 要求的指标
     return {
         'val_loss': avg_val_loss,
         'recon_geom_loss': avg_recon_geom_loss,
         'recon_app_loss': avg_recon_app_loss,
         'seg_miou': final_miou,
         'seg_pixel_acc': final_pixel_acc,
-        'depth_rmse': final_rmse,
-        'depth_abs_rel': final_abs_rel,
-        'depth_mae': final_mae,
+        'depth_abs_err': final_abs_err,
+        'depth_rel_err': final_rel_err,
+        'normal_mean_angle': mean_angle,
+        'normal_median_angle': median_angle,
+        'normal_acc_11': acc_11,
+        'normal_acc_22': acc_22,
+        'normal_acc_30': acc_30,
         'scene_acc': final_scene_acc
     }
 
 
-# ======= 追加：quick diagnose 支撑函数 =======
-import numpy as np
-
+# ======= 辅助函数 (QUICK DIAGNOSE) =======
 
 @torch.no_grad()
 def _depth_rmse(pred, gt):
-    pred = pred.float(); gt = gt.float()
+    pred = pred.float();
+    gt = gt.float()
     return torch.sqrt(F.mse_loss(pred, gt)).item()
 
 
@@ -189,8 +177,8 @@ def _edge_mag_2d(x):
     # x: [N,1,H,W] 或 [N,C,H,W]（只用第 1 通道）
     if x.dim() == 4 and x.size(1) > 1:
         x = x[:, :1]
-    kx = torch.tensor([[-1,0,1],[-2,0,2],[-1,0,1]], dtype=x.dtype, device=x.device).view(1,1,3,3)
-    ky = torch.tensor([[-1,-2,-1],[0,0,0],[1,2,1]], dtype=x.dtype, device=x.device).view(1,1,3,3)
+    kx = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=x.dtype, device=x.device).view(1, 1, 3, 3)
+    ky = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=x.dtype, device=x.device).view(1, 1, 3, 3)
     gx = F.conv2d(x, kx, padding=1)
     gy = F.conv2d(x, ky, padding=1)
     return torch.sqrt(gx * gx + gy * gy)
@@ -206,9 +194,9 @@ def _boundary_map_from_seg(seg_labels):
     seg = seg_labels
     # 邻域不等即边界（bool）
     b = torch.zeros((N, 1, H, W), dtype=torch.bool, device=seg.device)
-    b[:, :, 1:, :]  |= (seg[:, 1:, :]  != seg[:, :-1, :]).unsqueeze(1)
+    b[:, :, 1:, :] |= (seg[:, 1:, :] != seg[:, :-1, :]).unsqueeze(1)
     b[:, :, :-1, :] |= (seg[:, :-1, :] != seg[:, 1:, :]).unsqueeze(1)
-    b[:, :, :, 1:]  |= (seg[:, :, 1:]  != seg[:, :, :-1]).unsqueeze(1)
+    b[:, :, :, 1:] |= (seg[:, :, 1:] != seg[:, :, :-1]).unsqueeze(1)
     b[:, :, :, :-1] |= (seg[:, :, :-1] != seg[:, :, 1:]).unsqueeze(1)
     return b.float()
 
@@ -224,14 +212,17 @@ def _forward_decomposed(model, rgb_tensor):
     """
     注意：不加 no_grad 装饰器，确保后续可做 autograd.grad。
     """
-    feature_map   = model.encoder(rgb_tensor)                      # [B,768,14,14]
-    f_proj        = model.proj_f(feature_map)                      # [B,256,14,14]
-    z_s_map       = model.projector_s(feature_map)                 # [B,ds,14,14]
-    zs_proj       = model.proj_z_s(z_s_map)                        # [B,256,14,14]
-    zps_map_seg   = model.projector_p_seg(feature_map)
-    zps_proj_seg  = model.proj_z_p_seg(zps_map_seg)                # [B,256,14,14]
-    zps_map_depth = model.projector_p_depth(feature_map)
-    zps_proj_dep  = model.proj_z_p_depth(zps_map_depth)
+    # [MODIFIED] 使用 extract_features 接口
+    combined_feat, _, _ = model.extract_features(rgb_tensor)
+
+    # 投影
+    f_proj = model.proj_f(combined_feat)
+    z_s_map = model.projector_s(combined_feat)
+    zs_proj = model.proj_z_s(z_s_map)
+    zps_map_seg = model.projector_p_seg(combined_feat)
+    zps_proj_seg = model.proj_z_p_seg(zps_map_seg)
+    zps_map_depth = model.projector_p_depth(combined_feat)
+    zps_proj_dep = model.proj_z_p_depth(zps_map_depth)
     return f_proj, zs_proj, zps_proj_seg, zps_proj_dep, z_s_map, zps_map_seg, zps_map_depth
 
 
@@ -255,9 +246,9 @@ def quick_diagnose(model, val_loader, device, save_dir="runs/_quick_diag"):
 
     batch = next(iter(val_loader))
     # 标准键位
-    rgb   = batch['rgb'][:1].to(device)                # [1,3,H,W]
-    depth = batch['depth'][:1].to(device)              # [1,1,H,W]
-    seg   = batch['segmentation'][:1].to(device)       # [1,H,W]
+    rgb = batch['rgb'][:1].to(device)  # [1,3,H,W]
+    depth = batch['depth'][:1].to(device)  # [1,1,H,W]
+    seg = batch['segmentation'][:1].to(device)  # [1,H,W]
 
     # 1) 分解前向 & 三种变体（需要可追踪图）
     f_proj, zs_proj, zp_seg_proj, zp_dep_proj, z_s_map, z_p_seg_map, z_p_dep_map = _forward_decomposed(model, rgb)
@@ -265,28 +256,28 @@ def quick_diagnose(model, val_loader, device, save_dir="runs/_quick_diag"):
 
     # Depth
     pred_depth_main = model.predictor_depth(torch.cat([f_proj, zs_proj], 1), zp_dep_proj)
-    pred_depth_zs   = model.predictor_depth(torch.cat([f_proj, zs_proj], 1), torch.zeros_like(zp_dep_proj))
-    pred_depth_zp   = model.predictor_depth(torch.cat([f_proj, zeros],   1), zp_dep_proj)
+    pred_depth_zs = model.predictor_depth(torch.cat([f_proj, zs_proj], 1), torch.zeros_like(zp_dep_proj))
+    pred_depth_zp = model.predictor_depth(torch.cat([f_proj, zeros], 1), zp_dep_proj)
 
     # Seg
     pred_seg_main = model.predictor_seg(torch.cat([f_proj, zs_proj], 1), zp_seg_proj)
-    pred_seg_zs   = model.predictor_seg(torch.cat([f_proj, zs_proj], 1), torch.zeros_like(zp_seg_proj))
-    pred_seg_zp   = model.predictor_seg(torch.cat([f_proj, zeros],   1), zp_seg_proj)
+    pred_seg_zs = model.predictor_seg(torch.cat([f_proj, zs_proj], 1), torch.zeros_like(zp_seg_proj))
+    pred_seg_zp = model.predictor_seg(torch.cat([f_proj, zeros], 1), zp_seg_proj)
 
     # 影响力
     depth_inf_zs = _influence_ratio(pred_depth_main, pred_depth_zp)
     depth_inf_zp = _influence_ratio(pred_depth_main, pred_depth_zs)
 
     seg_prob_main = F.softmax(pred_seg_main, dim=1)
-    seg_prob_zs   = F.softmax(pred_seg_zs,   dim=1)
-    seg_prob_zp   = F.softmax(pred_seg_zp,   dim=1)
+    seg_prob_zs = F.softmax(pred_seg_zs, dim=1)
+    seg_prob_zp = F.softmax(pred_seg_zp, dim=1)
     seg_inf_zs = _influence_ratio(seg_prob_main, seg_prob_zs)
     seg_inf_zp = _influence_ratio(seg_prob_main, seg_prob_zp)
 
     # 单 batch 粗评估
     rmse_main = _depth_rmse(pred_depth_main, depth)
-    rmse_zs   = _depth_rmse(pred_depth_zs,   depth)
-    rmse_zp   = _depth_rmse(pred_depth_zp,   depth)
+    rmse_zs = _depth_rmse(pred_depth_zs, depth)
+    rmse_zp = _depth_rmse(pred_depth_zp, depth)
 
     pred_seg_label = pred_seg_main.argmax(1)  # [1,H,W]
     # 简单像素精度（忽略255）
@@ -296,11 +287,11 @@ def quick_diagnose(model, val_loader, device, save_dir="runs/_quick_diag"):
     pix_acc = inter / max(1, union)
 
     # seg 边界 vs recon_geom 边缘
-    recon_geom_final, _ = model.decoder_geom(z_s_map)      # [1,1,H,W]
-    geom_edge = _edge_mag_2d(recon_geom_final)             # [1,1,H,W]
-    seg_edge  = _boundary_map_from_seg(pred_seg_label)     # [1,1,H,W]
+    recon_geom_final, _ = model.decoder_geom(z_s_map)  # [1,1,H,W]
+    geom_edge = _edge_mag_2d(recon_geom_final)  # [1,1,H,W]
+    seg_edge = _boundary_map_from_seg(pred_seg_label)  # [1,1,H,W]
     ge = geom_edge / (geom_edge.max() + 1e-6)
-    se = seg_edge  / (seg_edge.max()  + 1e-6)
+    se = seg_edge / (seg_edge.max() + 1e-6)
     edge_corr = F.cosine_similarity(ge.view(1, -1), se.view(1, -1)).item()
 
     # 2) 梯度探针（autograd.grad；无梯度视为0）
@@ -330,3 +321,133 @@ def quick_diagnose(model, val_loader, device, save_dir="runs/_quick_diag"):
         "g_zs_seg": g_zs_seg, "g_zpseg_seg": g_zpseg_seg,
         "g_zs_dep": g_zs_dep, "g_zpdep_dep": g_zpdep_dep,
     }
+
+
+# ==========================================================
+# [NEW] LibMTL Aligned Metric Classes (for Depth & Normal)
+# ==========================================================
+
+class AbsMetric(object):
+    """LibMTL AbsMetric 抽象基类，适配我们的 update/compute/reset 流程。"""
+
+    def __init__(self):
+        self.bs = []
+
+    def update(self, *args):
+        self.update_fun(*args)
+
+    def compute(self):
+        return self.score_fun()
+
+    # [FIXED] 新增 to 方法，返回 self 以兼容 .to(device) 调用
+    def to(self, device):
+        return self
+
+    def reinit(self):
+        self.bs = []
+        if hasattr(self, 'abs_record'): self.abs_record = []
+        if hasattr(self, 'rel_record'): self.rel_record = []
+        if hasattr(self, 'record'): self.record = []
+
+    def reset(self):
+        self.reinit()
+
+
+class DepthMetric(AbsMetric):
+    """
+    对齐 LibMTL 的 DepthMetric，计算 Abs Err (MAE) 和 Rel Err。
+    """
+
+    def __init__(self):
+        super(DepthMetric, self).__init__()
+        self.abs_record = []
+        self.rel_record = []
+        self.bs = []
+
+    def update_fun(self, pred, gt):
+        # pred, gt 形状应为 [B, C, H, W]
+        device = pred.device
+        # 掩码: 过滤 GT 中全为 0 的像素
+        binary_mask = (torch.sum(gt, dim=1) != 0).unsqueeze(1).to(device)
+
+        num_valid_pixels = torch.nonzero(binary_mask, as_tuple=False).size(0)
+        if num_valid_pixels == 0:
+            return
+
+        pred = pred.masked_select(binary_mask)
+        gt = gt.masked_select(binary_mask)
+
+        abs_err = torch.abs(pred - gt)
+        rel_err = torch.abs(pred - gt) / torch.clamp(gt, min=1e-6)
+
+        abs_err_mean = (torch.sum(abs_err) / num_valid_pixels).item()
+        rel_err_mean = (torch.sum(rel_err) / num_valid_pixels).item()
+
+        self.abs_record.append(abs_err_mean)
+        self.rel_record.append(rel_err_mean)
+        self.bs.append(num_valid_pixels)
+
+    def score_fun(self):
+        if not self.bs:
+            return [0.0, 0.0]
+
+        records = np.stack([np.array(self.abs_record), np.array(self.rel_record)])
+        batch_size = np.array(self.bs)
+
+        total_pixels = sum(batch_size)
+        if total_pixels == 0:
+            return [0.0, 0.0]
+
+        # 计算加权平均 (误差 * 像素数 / 总像素数)
+        weighted_abs_err = (records[0] * batch_size).sum() / total_pixels
+        weighted_rel_err = (records[1] * batch_size).sum() / total_pixels
+
+        return [float(weighted_abs_err), float(weighted_rel_err)]
+
+
+class NormalMetric(AbsMetric):
+    """
+    对齐 LibMTL 的 NormalMetric，计算角度误差指标。
+    """
+
+    def __init__(self):
+        super(NormalMetric, self).__init__()
+        self.record = []  # 记录所有有效像素的角度误差 (度)
+
+    def update_fun(self, pred, gt):
+        # pred, gt 形状应为 [B, 3, H, W]
+
+        # 1. 法线归一化 (pred)
+        pred = pred / torch.norm(pred, p=2, dim=1, keepdim=True)
+
+        # 2. 掩码
+        binary_mask = (torch.sum(gt, dim=1) != 0)
+
+        # 3. 计算点积 (cos(theta))
+        # gt 已经是归一化的（根据 LibMTL 文档）
+        dot_product = torch.sum(pred * gt, 1).masked_select(binary_mask)
+
+        # 4. 角度误差 (acos(dot_product))
+        error_rad = torch.acos(torch.clamp(dot_product, -1, 1))
+
+        # 转换为角度 (度)
+        error_deg = torch.rad2deg(error_rad).detach().cpu().numpy()
+
+        self.record.append(error_deg)
+
+    def score_fun(self):
+        if not self.record:
+            return [0.0, 0.0, 0.0, 0.0, 0.0]
+
+        records = np.concatenate(self.record)
+
+        # 5. 计算指标
+        mean_angle = np.mean(records)
+        median_angle = np.median(records)
+
+        # 准确率 (Acc@T)
+        acc_11 = np.mean((records < 11.25) * 1.0)
+        acc_22 = np.mean((records < 22.5) * 1.0)
+        acc_30 = np.mean((records < 30) * 1.0)
+
+        return [float(mean_angle), float(median_angle), float(acc_11), float(acc_22), float(acc_30)]
