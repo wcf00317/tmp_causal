@@ -1,7 +1,6 @@
-# configs/resnet/causal_cityscapes_v7_depthboost.yaml
-# V7 策略：拉升深度权重至 10.0，消除“偏科”现象，冲击 Abs Err SOTA
+# configs/resnet/causal_cityscapes_v16_depth_offensive.yaml
+# V16 策略：L1 Loss + 20.0 深度权重，全力冲击 Abs Err SOTA
 
-# -- Data Parameters --
 data:
   type: "cityscapes"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/cityscape_preprocess"
@@ -10,7 +9,6 @@ data:
   img_size: [128, 256]
   pin_memory: True
 
-# -- Model Parameters --
 model:
   type: "causal"
   encoder_name: "resnet50"
@@ -19,9 +17,8 @@ model:
   latent_dim_p: 256
   z_s_bottleneck_noise: 0.1
   num_scene_classes: 1
-  num_seg_classes: 19
+  num_seg_classes: 7
   gating_scale_cap: 0.3
-
   decomposition:
     enabled: true
     normal_head_hidden: 128
@@ -30,48 +27,44 @@ model:
       sh_degree: 2
       grayscale_prior: true
 
-# -- Training Parameters --
 training:
-  seed: 42
-  epochs: 100
+  seed: 2025
+  epochs: 200             # [200 Epoch]
   optimizer: "Adam"
   learning_rate: 0.0001
   weight_decay: 0.00001
   enable_training: True
 
-  # 保持预热
   stage1_epochs: 20
   ind_warmup_epochs: 20
 
-  # 保持 Cosine (它证明了有效性)
   lr_scheduler:
     type: "cosine"
     warmup_epochs: 5
     min_lr_factor: 0.01
 
-# -- Loss Weights --
 losses:
-  # 1. 任务损失 (关键调整)
-  lambda_seg: 10.0        # [KEEP] 保持高位，稳住 0.70 mIoU
-  lambda_depth: 10.0      # [BOOST] 从 1.0 提升到 10.0，全力优化 Abs Err
+  # 1. 任务损失 (深度优先)
+  lambda_seg: 8.0         # [LOWER] 稍微让步
+  lambda_depth: 20.0      # [MAX] L1 Loss 下的极限权重，死磕 Abs Err
   lambda_normal: 0.0
   lambda_scene: 0.0
 
   # 2. 因果约束
-  lambda_independence: 0.05 # [KEEP] 维持现状
+  lambda_independence: 0.05
 
-  # 3. 重构损失
-  alpha_recon_geom: 2.0
-  beta_recon_app: 2.0
+  # 3. 重构损失 (降低)
+  alpha_recon_geom: 1.0   # [LOW]
+  beta_recon_app: 1.0     # [LOW]
   lambda_l1_recon: 1.0
 
-  # 4. 辅助/边缘
-  alpha_recon_geom_aux: 0.5
-  beta_recon_app_aux: 0.5
-  lambda_depth_zp: 0.5
+  # 4. 辅助
+  alpha_recon_geom_aux: 0.2
+  beta_recon_app_aux: 0.2
+  lambda_depth_zp: 0.2
 
-  # 5. 分解正则化
-  lambda_img: 3.0         # [KEEP] 保持可视化质量
+  # 5. 分解正则
+  lambda_img: 1.0         # [LOW]
   lambda_alb_tv: 0.01
   lambda_alb_chroma: 0.01
   lambda_sh_gray: 0.1

@@ -1,7 +1,7 @@
-# configs/resnet/causal_cityscapes_v8_puretask.yaml
-# V8 策略：降低重构干扰，全力优化 Seg 和 Depth 任务指标
+# configs/resnet/causal_cityscapes_v14_clean_feature.yaml
+# V14 策略：加强解耦 (Indep=0.5) + 加强重构 (Recon=2.0)
+# 假设 Abs Err 的瓶颈在于特征不纯，通过清洗特征来提升泛化能力
 
-# -- Data Parameters --
 data:
   type: "cityscapes"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/cityscape_preprocess"
@@ -10,7 +10,6 @@ data:
   img_size: [128, 256]
   pin_memory: True
 
-# -- Model Parameters --
 model:
   type: "causal"
   encoder_name: "resnet50"
@@ -19,9 +18,8 @@ model:
   latent_dim_p: 256
   z_s_bottleneck_noise: 0.1
   num_scene_classes: 1
-  num_seg_classes: 19
+  num_seg_classes: 7
   gating_scale_cap: 0.3
-
   decomposition:
     enabled: true
     normal_head_hidden: 128
@@ -30,48 +28,46 @@ model:
       sh_degree: 2
       grayscale_prior: true
 
-# -- Training Parameters --
 training:
-  seed: 888               # 换个种子
+  seed: 888
   epochs: 100
   optimizer: "Adam"
   learning_rate: 0.0001
   weight_decay: 0.00001
   enable_training: True
 
-  stage1_epochs: 20
-  ind_warmup_epochs: 20
+  stage1_epochs: 30       # 延长预热
+  ind_warmup_epochs: 30
 
   lr_scheduler:
     type: "cosine"
     warmup_epochs: 5
     min_lr_factor: 0.01
 
-# -- Loss Weights --
 losses:
-  # 1. 任务损失 (双高)
-  lambda_seg: 10.0
-  lambda_depth: 10.0      # [BOOST]
+  # 1. 任务损失 (适中)
+  lambda_seg: 10.0        # 保持标准
+  lambda_depth: 20.0      # [HIGH] 依然给高权重，但不如 V13 激进
   lambda_normal: 0.0
   lambda_scene: 0.0
 
-  # 2. 因果约束
-  lambda_independence: 0.05
+  # 2. 因果约束 (加强)
+  lambda_independence: 1.0 # [BOOST] 强迫 CKA 下降，清洗特征
 
-  # 3. 重构损失 (全面降权)
-  alpha_recon_geom: 1.0   # [LOWER] 降低几何重构要求
-  beta_recon_app: 0.5     # [LOWER] 降低外观重构要求
+  # 3. 重构损失 (加强)
+  alpha_recon_geom: 2.0   # [BOOST] 确保 zs 包含足够几何信息
+  beta_recon_app: 2.0     # [BOOST] 确保 zp 包含足够纹理信息
   lambda_l1_recon: 1.0
 
-  # 4. 辅助/边缘
-  alpha_recon_geom_aux: 0.2
-  beta_recon_app_aux: 0.2
-  lambda_depth_zp: 0.2
+  # 4. 辅助
+  alpha_recon_geom_aux: 0.5
+  beta_recon_app_aux: 0.5
+  lambda_depth_zp: 0.5
 
-  # 5. 分解正则化
-  lambda_img: 0.5         # [MINIMAL] 只保留最低限度的正则，不抢占梯度
-  lambda_alb_tv: 0.001
-  lambda_alb_chroma: 0.001
-  lambda_sh_gray: 0.01
-  lambda_norm: 0.01
-  lambda_xcov: 0.01
+  # 5. 分解正则
+  lambda_img: 2.0         # [BOOST] 恢复一定的画图能力，辅助解耦
+  lambda_alb_tv: 0.01
+  lambda_alb_chroma: 0.01
+  lambda_sh_gray: 0.1
+  lambda_norm: 0.1
+  lambda_xcov: 0.05

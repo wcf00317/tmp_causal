@@ -1,4 +1,4 @@
-import yaml
+import yaml,json
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -47,6 +47,11 @@ def main(config_path):
     setup_logging(run_dir)
     logging.info("✅ Configuration loaded successfully.")
     logging.info(f"📂 All outputs for this run will be saved in: {run_dir}")
+    logging.info("=" * 60)
+    logging.info("🔧 Final Execution Configuration:")
+    # 使用 json.dumps 格式化打印，default=str 防止某些对象无法序列化
+    logging.info(json.dumps(config, indent=4, default=str))
+    logging.info("=" * 60)
 
     # 2. 设置计算设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -75,8 +80,8 @@ def main(config_path):
 
         elif dataset_type == 'cityscapes':
             logging.info("🌍 Mode: Cityscapes (LibMTL format)")
-            train_dataset = CityscapesDataset(root_dir=dataset_path, split='train', img_size=img_size)
-            val_dataset = CityscapesDataset(root_dir=dataset_path, split='val', img_size=img_size)
+            train_dataset = CityscapesDataset(root_dir=dataset_path, split='train')
+            val_dataset = CityscapesDataset(root_dir=dataset_path, split='val')
             full_dataset = train_dataset
 
         elif dataset_type == 'nyuv2':
@@ -158,7 +163,7 @@ def main(config_path):
             {'params': head_params, 'lr': base_lr * 10}  # Head LR 通常大一些 (可选，或者保持一致)
         ], lr=base_lr, weight_decay=config['training']['weight_decay'])
 
-        criterion = AdaptiveCompositeLoss(config['losses']).to(device)
+        criterion = AdaptiveCompositeLoss(config['losses'], dataset_type).to(device)
 
     logging.info(f"🔧 Optimizer: {config['training']['optimizer']}, LR: {base_lr}")
 

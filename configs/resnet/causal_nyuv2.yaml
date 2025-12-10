@@ -1,7 +1,7 @@
-# configs/resnet/causal_nyuv2_v5_depth_sota.yaml
-# V5 策略：在保持 Seg/Normal SOTA 的基础上，全力修复 Depth 短板
+# configs/resnet/causal_nyuv2_v13_strong_indep.yaml
+# V13 策略：强力解耦 (Indep=1.0) + 高压深度 (Depth=20.0)
+# 旨在通过强制剥离纹理干扰，倒逼 z_s 学出更纯粹的几何结构
 
-# -- Data --
 data:
   type: "nyuv2"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
@@ -10,7 +10,6 @@ data:
   img_size: [384, 384]
   pin_memory: True
 
-# -- Model --
 model:
   type: "causal"
   encoder_name: "resnet50"
@@ -21,7 +20,6 @@ model:
   num_scene_classes: 1
   num_seg_classes: 40
   gating_scale_cap: 0.3
-
   decomposition:
     enabled: true
     normal_head_hidden: 128
@@ -30,36 +28,34 @@ model:
       sh_degree: 2
       grayscale_prior: true
 
-# -- Training --
 training:
-  seed: 2025              # 新种子
-  epochs: 100             # 保持 200 以便充分收敛
+  seed: 2025
+  epochs: 200
   optimizer: "Adam"
   learning_rate: 0.0001
   weight_decay: 0.00001
   enable_training: True
 
-  stage1_epochs: 20
-  ind_warmup_epochs: 20
+  # 延长预热，因为强解耦需要时间适应
+  stage1_epochs: 30
+  ind_warmup_epochs: 30
 
   lr_scheduler:
     type: "cosine"
     warmup_epochs: 5
     min_lr_factor: 0.01
 
-# -- Losses (关键调整) --
 losses:
-  # 1. 任务损失 (非对称加权)
-  lambda_seg: 2.0         # [KEEP] 保持现状，稳住 mIoU
-  lambda_normal: 2.0      # [BOOST] 从 1.0 提至 2.0，巩固 Normal 优势
-  lambda_depth: 10.0      # [CRITICAL] 从 1.0 暴增至 10.0，强制模型关注 Depth L1 Loss
-  lambda_scene: 0.0
+  # 1. 任务损失 (保持 Depth 高压)
+  lambda_seg: 5.0         # 适中，给 Depth 让路
+  lambda_normal: 5.0      # 适中
+  lambda_depth: 20.0      # [HIGH] 继续死磕 Abs Err
 
-  # 2. 因果约束
-  lambda_independence: 0.1 # [KEEP] V4 的设置证明有效
+  # 2. 因果约束 (核心变量)
+  # [CRITICAL] 提升至 1.0。强迫 CKA 降到 0.1 以下。
+  lambda_independence: 1.0
 
-  # 3. 重构损失 (适度降权)
-  # [LOWER] 从 5.0 降至 2.0。V4 的 5.0 虽然让可视化清晰，但可能抢了深度的资源。
+  # 3. 重构损失 (适中，辅助解耦)
   alpha_recon_geom: 2.0
   beta_recon_app: 2.0
   lambda_l1_recon: 1.0
@@ -70,7 +66,7 @@ losses:
   lambda_depth_zp: 0.5
 
   # 5. 分解正则
-  lambda_img: 2.0         # [LOWER] 从 5.0 降至 2.0，给深度任务腾出梯度空间
+  lambda_img: 2.0         # 保持一定权重，让解耦后的特征能重构回图片
   lambda_alb_tv: 0.01
   lambda_alb_chroma: 0.01
   lambda_sh_gray: 0.1

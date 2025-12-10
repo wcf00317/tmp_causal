@@ -6,6 +6,32 @@ from .linear_cka import LinearCKA
 import torch.nn.functional as F
 from metrics.lpips import LPIPSMetric
 
+
+class ScaleInvariantLoss(nn.Module):
+    def __init__(self, lambda_var=0.5):
+        super().__init__()
+        self.lambda_var = lambda_var
+
+    def forward(self, pred, target):
+        # 1. 过滤无效真值 (target <= 0 的区域不计算)
+        valid_mask = target > 0
+        pred = pred[valid_mask]
+        target = target[valid_mask]
+
+        # [CRITICAL FIX] 2. 强制截断预测值，防止 <= 0 导致 log 报错
+        # 深度预测必须是正数，这里限制最小值为 0.001 (1毫米)
+        pred = torch.clamp(pred, min=1e-3)
+
+        # 3. 转换到 Log 空间 (不再需要 +1e-6，因为已经 clamp 过了)
+        d = torch.log(pred) - torch.log(target)
+
+        # 4. Loss 计算
+        term1 = torch.mean(d ** 2)
+        term2 = (torch.mean(d)) ** 2
+
+        loss = term1 - self.lambda_var * term2
+        return loss
+
 def edge_weight_from_gt(gt, alpha=2.0, q=0.7):
     """计算边界权重 w in [1, 1+alpha]"""
     if gt.dim()==3: gt=gt.unsqueeze(1)
@@ -186,13 +212,16 @@ class AdaptiveCompositeLoss(nn.Module):
     该改动不改变 d/d(log_var) 的梯度（仍为 0.5），
     因而不影响优化动态，但能避免“总损为负”的日志现象。
     """
-    def __init__(self, loss_weights):
+    def __init__(self, loss_weights,dataset):
         super().__init__()
         self.weights = loss_weights
 
         # ==== 基础项 ====
         self.seg_loss = nn.CrossEntropyLoss(ignore_index=-1)
-        self.depth_loss = nn.L1Loss()
+        if dataset == "nyuv2":
+            self.depth_loss = ScaleInvariantLoss(lambda_var=0.5)
+        elif dataset == "cityscapes" or "gta5_to_cityscapes":
+            self.depth_loss = nn.L1Loss()
         self.scene_loss = nn.CrossEntropyLoss()
         self.normal_loss = NormalLoss()  # [NEW] 新增法线损失函数
 
@@ -292,11 +321,11 @@ class AdaptiveCompositeLoss(nn.Module):
 
         z_s_centered = z_s - z_s.mean(dim=0, keepdim=True)
 
-        cka_seg = self.independence_loss(z_s_centered, z_p_seg - z_p_seg.mean(0, keepdim=True))
-        cka_depth = self.independence_loss(z_s_centered, z_p_depth - z_p_depth.mean(0, keepdim=True))
-        if 'z_p_normal' in outputs:
+        cka_seg = self.independence_loss(z_s_centered.detach(), z_p_seg - z_p_seg.mean(0, keepdim=True))
+        cka_depth = self.independence_loss(z_s_centered.detach(), z_p_depth - z_p_depth.mean(0, keepdim=True))
+        if 'z_p_normal' in outputs and self.weights.get('lambda_normal', 0.0) > 0:
             z_p_normal = outputs['z_p_normal']
-            cka_normal = self.independence_loss(z_s_centered, z_p_normal - z_p_normal.mean(0, keepdim=True))
+            cka_normal = self.independence_loss(z_s_centered.detach(), z_p_normal - z_p_normal.mean(0, keepdim=True))
         else:
             cka_normal = torch.tensor(0.0, device=z_s.device)
 

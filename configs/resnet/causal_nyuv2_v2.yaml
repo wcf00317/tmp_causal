@@ -1,7 +1,7 @@
-# configs/resnet/causal_nyuv2_v6_task_supremacy.yaml
-# V6 策略：牺牲部分可视化清晰度，换取全指标 SOTA
+# configs/resnet/causal_nyuv2_v14_extreme_ortho.yaml
+# V14 策略：极限正交 (Indep=2.0) + 强法线辅助 (Normal=10.0)
+# 利用法线任务对结构的敏感性，配合强解耦，间接提升深度精度
 
-# -- Data --
 data:
   type: "nyuv2"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
@@ -10,7 +10,6 @@ data:
   img_size: [384, 384]
   pin_memory: True
 
-# -- Model --
 model:
   type: "causal"
   encoder_name: "resnet50"
@@ -21,7 +20,6 @@ model:
   num_scene_classes: 1
   num_seg_classes: 40
   gating_scale_cap: 0.3
-
   decomposition:
     enabled: true
     normal_head_hidden: 128
@@ -30,48 +28,46 @@ model:
       sh_degree: 2
       grayscale_prior: true
 
-# -- Training --
 training:
-  seed: 999
-  epochs: 100
+  seed: 888
+  epochs: 200
   optimizer: "Adam"
   learning_rate: 0.0001
   weight_decay: 0.00001
   enable_training: True
-  
-  stage1_epochs: 10       # 更快进入联合训练
-  ind_warmup_epochs: 10
+
+  stage1_epochs: 30
+  ind_warmup_epochs: 30
 
   lr_scheduler:
     type: "cosine"
     warmup_epochs: 5
     min_lr_factor: 0.01
 
-# -- Losses --
 losses:
-  # 1. 任务损失 (全面拉升)
-  lambda_seg: 10.0        # [MAX]
-  lambda_depth: 20.0      # [MAX] 给深度最高优先级
-  lambda_normal: 10.0     # [MAX]
-  lambda_scene: 0.0
+  # 1. 任务损失
+  lambda_seg: 5.0
+  lambda_normal: 10.0     # [BOOST] 提至 10.0，利用 Normal 修正 Depth 细节
+  lambda_depth: 15.0      # [BALANCE] 略微下调，配合 Normal 使用
 
-  # 2. 因果约束 (弱)
-  lambda_independence: 0.05 # [LOW] 不强求低 CKA，只要不崩溃即可
+  # 2. 因果约束
+  # [EXTREME] 提至 2.0。这会极大地惩罚相关性，CKA 可能会非常低。
+  lambda_independence: 2.0
 
-  # 3. 重构损失 (极低)
-  alpha_recon_geom: 0.5   # [LOW] 仅作为弱监督
-  beta_recon_app: 0.5
+  # 3. 重构损失
+  alpha_recon_geom: 5.0   # [HIGH] 强迫 z_s 包含足够信息来重构深度
+  beta_recon_app: 1.0     # 降低外观权重，不care颜色
   lambda_l1_recon: 1.0
 
   # 4. 辅助
-  alpha_recon_geom_aux: 0.1
-  beta_recon_app_aux: 0.1
-  lambda_depth_zp: 0.1
+  alpha_recon_geom_aux: 1.0
+  beta_recon_app_aux: 0.2
+  lambda_depth_zp: 0.2
 
-  # 5. 分解正则 (极低)
-  lambda_img: 0.5         # [LOW] 保证基本生成能力即可，不求高清
-  lambda_alb_tv: 0.001
-  lambda_alb_chroma: 0.001
-  lambda_sh_gray: 0.01
-  lambda_norm: 0.01
-  lambda_xcov: 0.01
+  # 5. 分解正则
+  lambda_img: 1.0
+  lambda_alb_tv: 0.01
+  lambda_alb_chroma: 0.01
+  lambda_sh_gray: 0.1
+  lambda_norm: 0.1
+  lambda_xcov: 0.05
