@@ -1,13 +1,13 @@
-# configs/resnet/causal_nyuv2_v14_extreme_ortho.yaml
-# V14 策略：极限正交 (Indep=2.0) + 强法线辅助 (Normal=10.0)
-# 利用法线任务对结构的敏感性，配合强解耦，间接提升深度精度
+# configs/resnet/causal_nyuv2_v16_task_supremacy.yaml
+# V16 策略：几乎关闭所有辅助任务，所有主任务权重拉满
+# 目的：消除所有额外干扰，把 ResNet 的能力全部用于刷榜
 
 data:
   type: "nyuv2"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
   batch_size: 8
   num_workers: 4
-  img_size: [384, 384]
+  img_size: [288, 384]
   pin_memory: True
 
 model:
@@ -30,14 +30,15 @@ model:
 
 training:
   seed: 888
-  epochs: 200
+  epochs: 100
   optimizer: "Adam"
   learning_rate: 0.0001
   weight_decay: 0.00001
   enable_training: True
 
-  stage1_epochs: 30
-  ind_warmup_epochs: 30
+  # 缩短预热，直接进入多任务
+  stage1_epochs: 10
+  ind_warmup_epochs: 10
 
   lr_scheduler:
     type: "cosine"
@@ -45,29 +46,28 @@ training:
     min_lr_factor: 0.01
 
 losses:
-  # 1. 任务损失
-  lambda_seg: 5.0
-  lambda_normal: 10.0     # [BOOST] 提至 10.0，利用 Normal 修正 Depth 细节
-  lambda_depth: 15.0      # [BALANCE] 略微下调，配合 Normal 使用
+  # 1. 任务损失 (全员拉满)
+  lambda_seg: 10.0        # [HIGH] 恢复高位
+  lambda_normal: 15.0     # [EXTREME] 极高法线权重
+  lambda_depth: 30.0      # [EXTREME] 极高深度权重
 
-  # 2. 因果约束
-  # [EXTREME] 提至 2.0。这会极大地惩罚相关性，CKA 可能会非常低。
-  lambda_independence: 2.0
+  # 2. 因果约束 (几乎关闭)
+  lambda_independence: 0.01
 
-  # 3. 重构损失
-  alpha_recon_geom: 5.0   # [HIGH] 强迫 z_s 包含足够信息来重构深度
-  beta_recon_app: 1.0     # 降低外观权重，不care颜色
-  lambda_l1_recon: 1.0
+  # 3. 重构损失 (几乎关闭)
+  alpha_recon_geom: 0.1
+  beta_recon_app: 0.1
+  lambda_l1_recon: 0.1
 
   # 4. 辅助
-  alpha_recon_geom_aux: 1.0
-  beta_recon_app_aux: 0.2
-  lambda_depth_zp: 0.2
+  alpha_recon_geom_aux: 0.0
+  beta_recon_app_aux: 0.0
+  lambda_depth_zp: 0.0
 
-  # 5. 分解正则
-  lambda_img: 1.0
-  lambda_alb_tv: 0.01
-  lambda_alb_chroma: 0.01
-  lambda_sh_gray: 0.1
-  lambda_norm: 0.1
-  lambda_xcov: 0.05
+  # 5. 分解正则 (关闭)
+  lambda_img: 0.0
+  lambda_alb_tv: 0.0
+  lambda_alb_chroma: 0.0
+  lambda_sh_gray: 0.0
+  lambda_norm: 0.0
+  lambda_xcov: 0.0

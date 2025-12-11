@@ -1,6 +1,4 @@
-# configs/resnet/causal_cityscapes_v14_clean_feature.yaml
-# V14 策略：加强解耦 (Indep=0.5) + 加强重构 (Recon=2.0)
-# 假设 Abs Err 的瓶颈在于特征不纯，通过清洗特征来提升泛化能力
+# configs/resnet/causal_cityscapes_v8_texture.yaml
 
 data:
   type: "cityscapes"
@@ -18,7 +16,7 @@ model:
   latent_dim_p: 256
   z_s_bottleneck_noise: 0.1
   num_scene_classes: 1
-  num_seg_classes: 7
+  num_seg_classes: 19
   gating_scale_cap: 0.3
   decomposition:
     enabled: true
@@ -29,15 +27,15 @@ model:
       grayscale_prior: true
 
 training:
-  seed: 888
+  seed: 8888
   epochs: 100
   optimizer: "Adam"
   learning_rate: 0.0001
   weight_decay: 0.00001
   enable_training: True
 
-  stage1_epochs: 30       # 延长预热
-  ind_warmup_epochs: 30
+  stage1_epochs: 30      # 充分预热
+  ind_warmup_epochs: 20
 
   lr_scheduler:
     type: "cosine"
@@ -45,27 +43,27 @@ training:
     min_lr_factor: 0.01
 
 losses:
-  # 1. 任务损失 (适中)
-  lambda_seg: 10.0        # 保持标准
-  lambda_depth: 20.0      # [HIGH] 依然给高权重，但不如 V13 激进
+  # 1. 任务
+  lambda_seg: 10.0
+  lambda_depth: 25.0      # [MAX] 再次强调深度
   lambda_normal: 0.0
   lambda_scene: 0.0
 
-  # 2. 因果约束 (加强)
-  lambda_independence: 1.0 # [BOOST] 强迫 CKA 下降，清洗特征
+  # 2. 因果
+  lambda_independence: 1.0 # [KEEP] 保持现状，不过度干扰 z_p
 
-  # 3. 重构损失 (加强)
-  alpha_recon_geom: 2.0   # [BOOST] 确保 zs 包含足够几何信息
-  beta_recon_app: 2.0     # [BOOST] 确保 zp 包含足够纹理信息
-  lambda_l1_recon: 1.0
+  # 3. 重构 (强化 z_p 的学习能力)
+  alpha_recon_geom: 2.0
+  beta_recon_app: 5.0      # [BOOST] 2.0 -> 5.0，强迫 z_p 记清每一个纹理细节
+  lambda_l1_recon: 2.0     # 配合 L1 提升清晰度
 
   # 4. 辅助
   alpha_recon_geom_aux: 0.5
-  beta_recon_app_aux: 0.5
-  lambda_depth_zp: 0.5
+  beta_recon_app_aux: 1.0
+  lambda_depth_zp: 1.0     # [BOOST] 0.5 -> 1.0，让 z_p 对深度的贡献更直接
 
   # 5. 分解正则
-  lambda_img: 2.0         # [BOOST] 恢复一定的画图能力，辅助解耦
+  lambda_img: 2.0
   lambda_alb_tv: 0.01
   lambda_alb_chroma: 0.01
   lambda_sh_gray: 0.1

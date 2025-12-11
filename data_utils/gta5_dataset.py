@@ -7,37 +7,36 @@ from torchvision import transforms
 from PIL import Image
 import random
 
-# GTA5 (34 classes) -> Cityscapes (19 classes) 映射表
+# GTA5 (34 classes) -> Cityscapes (7 classes) 映射表
 # 格式: GTA5_ID: Cityscapes_TrainID
 # 255 表示忽略
-GTA5_TO_CITYSCAPES_MAPPING = {
+GTA5_TO_7_CLASSES = {
     0: 255, 1: 255, 2: 255, 3: 255, 4: 255, 5: 255, 6: 255,
-    7: 0,  # Road
-    8: 1,  # Sidewalk
+    7: 0,   # Road -> Flat
+    8: 0,   # Sidewalk -> Flat
     9: 255, 10: 255,
-    11: 2,  # Building
-    12: 3,  # Wall
-    13: 4,  # Fence
+    11: 1,  # Building -> Construction
+    12: 1,  # Wall -> Construction
+    13: 1,  # Fence -> Construction
     14: 255, 15: 255, 16: 255,
-    17: 5,  # Pole
+    17: 2,  # Pole -> Object
     18: 255,
-    19: 6,  # Traffic light
-    20: 7,  # Traffic sign
-    21: 8,  # Vegetation
-    22: 9,  # Terrain
-    23: 10,  # Sky
-    24: 11,  # Person
-    25: 12,  # Rider
-    26: 13,  # Car
-    27: 14,  # Truck
-    28: 15,  # Bus
+    19: 2,  # Traffic light -> Object
+    20: 2,  # Traffic sign -> Object
+    21: 3,  # Vegetation -> Nature
+    22: 3,  # Terrain -> Nature
+    23: 4,  # Sky -> Sky
+    24: 5,  # Person -> Human
+    25: 5,  # Rider -> Human
+    26: 6,  # Car -> Vehicle
+    27: 6,  # Truck -> Vehicle
+    28: 6,  # Bus -> Vehicle
     29: 255, 30: 255,
-    31: 16,  # Train
-    32: 17,  # Motorcycle
-    33: 18,  # Bicycle
+    31: 6,  # Train -> Vehicle
+    32: 6,  # Motorcycle -> Vehicle
+    33: 6,  # Bicycle -> Vehicle
     -1: 255
 }
-
 
 class GTA5Dataset(Dataset):
     def __init__(self, root_dir, img_size=(384, 384)):
@@ -81,7 +80,7 @@ class GTA5Dataset(Dataset):
 
         # 预计算映射数组
         self.mapping = np.zeros(256, dtype=np.int64) + 255
-        for k, v in GTA5_TO_CITYSCAPES_MAPPING.items():
+        for k, v in GTA5_TO_7_CLASSES.items():
             if k >= 0:
                 self.mapping[k] = v
 
@@ -110,8 +109,6 @@ class GTA5Dataset(Dataset):
         to_tensor = transforms.ToTensor()
         rgb_tensor_unnormalized = to_tensor(img).float()
 
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        rgb_tensor_normalized = normalize(rgb_tensor_unnormalized)
 
         # Label Mapping
         label_np = np.array(label, dtype=np.int64)
@@ -125,7 +122,7 @@ class GTA5Dataset(Dataset):
         depth_tensor = torch.zeros((1, self.img_size[1], self.img_size[0]), dtype=torch.float32)
 
         return {
-            'rgb': rgb_tensor_normalized,
+            'rgb': rgb_tensor_unnormalized,
             'depth': depth_tensor,  # 占位
             'segmentation': seg_tensor,
             'scene_type': torch.tensor(0),  # 占位

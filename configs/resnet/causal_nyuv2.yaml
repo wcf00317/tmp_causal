@@ -7,7 +7,7 @@ data:
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
   batch_size: 8
   num_workers: 4
-  img_size: [384, 384]
+  img_size: [288, 384]
   pin_memory: True
 
 model:

@@ -74,7 +74,7 @@ def main(config_path):
             train_path = data_cfg['train_dataset_path']
             val_path = data_cfg['val_dataset_path']
             train_dataset = GTA5Dataset(root_dir=train_path, img_size=img_size)
-            val_dataset = CityscapesDataset(root_dir=val_path, split='val', img_size=img_size)
+            val_dataset = CityscapesDataset(root_dir=val_path, split='val')
             # 兼容性引用
             full_dataset = train_dataset
 
@@ -88,8 +88,8 @@ def main(config_path):
             logging.info("🏠 Mode: NYUv2 (LibMTL format - Folder based)")
             # [MODIFIED] 不再读取 HDF5，而是直接实例化 Train/Val Dataset
             # LibMTL 格式中，train 和 val 是分开的文件夹，通过 mode 参数控制
-            train_dataset = NYUv2Dataset(root_dir=dataset_path, mode='train', img_size=img_size)
-            val_dataset = NYUv2Dataset(root_dir=dataset_path, mode='val', img_size=img_size)
+            train_dataset = NYUv2Dataset(root_dir=dataset_path, mode='train')
+            val_dataset = NYUv2Dataset(root_dir=dataset_path, mode='val')
             full_dataset = train_dataset  # 仅用于获取属性，不影响逻辑
 
         else:

@@ -127,6 +127,7 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
         batch = {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
         rgb = batch['rgb']
 
+
         outputs = model(rgb, stage=stage)
 
         crit_out = criterion(outputs, batch)

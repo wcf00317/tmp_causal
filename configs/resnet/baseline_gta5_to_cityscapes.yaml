@@ -1,0 +1,54 @@
+# configs/baseline_gta5_to_cityscapes.yaml
+
+# -- Data Parameters --
+data:
+  type: "gta5_to_cityscapes"
+  # 请确保路径和你之前跑通的一致
+  train_dataset_path: "/data/chengfengwu/alrl/mtl_dataset/gta5/train"
+
+  # 2. 目标域验证集 (Cityscapes Val) - 用于选最佳模型
+  val_dataset_path: "/data/chengfengwu/alrl/mtl_dataset/cityscape_preprocess"
+
+  # 3. ★新增★: 源域验证集 (GTA5 Val) - 用于填表第一列
+  source_val_path: "/data/chengfengwu/alrl/mtl_dataset/gta5/val"
+  batch_size: 8
+  num_workers: 4
+  img_size: [384, 384]
+  pin_memory: True
+
+# -- Model Parameters --
+model:
+  type: "causal"        # ★ 指定使用 Baseline
+  encoder_name: "resnet50"
+  pretrained: True
+
+  # ★ 关键修改: Cityscapes 是 19 类 (0-18)
+  num_seg_classes: 7
+
+  # GTA5 没有场景标签，这里设为 1 仅作占位，避免报错
+  num_scene_classes: 1
+
+# -- Training Parameters --
+training:
+  seed: 42
+  epochs: 50             # Sim-to-Real 建议多训一些
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+
+  # Baseline 策略 (Raw MTL 使用 fixed 权重)
+  strategy: "fixed"
+
+  lr_scheduler:
+    type: cosine
+    warmup_epochs: 3
+    min_lr_factor: 0.1
+
+# -- Loss Weights --
+losses:
+  # === 仅保留分割 Loss ===
+  lambda_seg: 10.0
+
+  # === 关闭缺失模态的 Loss ===
+  lambda_depth: 0.0      # GTA5 无深度
+  lambda_scene: 0.0      # GTA5 无场景标签

@@ -277,24 +277,33 @@ class AdaptiveCompositeLoss(nn.Module):
 
     def forward(self, outputs, targets):
         loss_dict = {}
-
         # ===== 1) 主任务 =====
+        print("A"*50)
+        print(outputs['pred_seg'])
+        print("="*50)
+        print( targets['segmentation'])
         l_seg = self.seg_loss(outputs['pred_seg'], targets['segmentation'])
+        print("g" * 50)
         loss_seg = self._uw('seg', l_seg)
-
         # Depth
-        l_depth = self.depth_loss(outputs['pred_depth'], targets['depth'])
-        loss_depth = self._uw('depth', l_depth)
-
+        print("B" * 50)
+        if self.weights.get('lambda_depth', 0.0) > 0:
+            print("C" * 50)
+            l_depth = self.depth_loss(outputs['pred_depth'], targets['depth'])
+            loss_depth = self._uw('depth', l_depth)
+        else:
+            print("D" * 50)
+            loss_depth = torch.tensor(0.0, device=l_seg.device)
         # Scene (Optional: 只有当权重 > 0 时才计算，兼容 NYUv2 无场景标签)
+        print("E" * 50)
         if self.weights.get('lambda_scene', 0.0) > 0:
             l_scene = self.scene_loss(outputs['pred_scene'], targets['scene_type'])
             loss_scene = self._uw('scene', l_scene)
         else:
             l_scene = torch.tensor(0.0, device=l_seg.device)
             loss_scene = torch.tensor(0.0, device=l_seg.device)
-
         # Normal [NEW] (只有当输出和目标都存在时计算)
+        print("F" * 50)
         if 'normals' in outputs and 'normal' in targets and self.weights.get('lambda_normal', 0.0) > 0:
             l_normal = self.normal_loss(outputs['normals'], targets['normal'])
             loss_normal = self._uw('normal', l_normal)
