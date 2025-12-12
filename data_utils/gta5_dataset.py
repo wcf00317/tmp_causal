@@ -11,35 +11,34 @@ import random
 # 格式: GTA5_ID: Cityscapes_TrainID
 # 255 表示忽略
 GTA5_TO_7_CLASSES = {
-    0: 255, 1: 255, 2: 255, 3: 255, 4: 255, 5: 255, 6: 255,
-    7: 0,   # Road -> Flat
-    8: 0,   # Sidewalk -> Flat
-    9: 255, 10: 255,
-    11: 1,  # Building -> Construction
-    12: 1,  # Wall -> Construction
-    13: 1,  # Fence -> Construction
-    14: 255, 15: 255, 16: 255,
-    17: 2,  # Pole -> Object
-    18: 255,
-    19: 2,  # Traffic light -> Object
-    20: 2,  # Traffic sign -> Object
-    21: 3,  # Vegetation -> Nature
-    22: 3,  # Terrain -> Nature
-    23: 4,  # Sky -> Sky
-    24: 5,  # Person -> Human
-    25: 5,  # Rider -> Human
-    26: 6,  # Car -> Vehicle
-    27: 6,  # Truck -> Vehicle
-    28: 6,  # Bus -> Vehicle
-    29: 255, 30: 255,
-    31: 6,  # Train -> Vehicle
-    32: 6,  # Motorcycle -> Vehicle
-    33: 6,  # Bicycle -> Vehicle
-    -1: 255
+    0: -1, 1: -1, 2: -1, 3: -1, 4: -1, 5: -1, 6: -1,
+    7: 0,   # Road
+    8: 0,   # Sidewalk
+    9: -1, 10: -1,
+    11: 1,  # Building
+    12: 1,  # Wall
+    13: 1,  # Fence
+    14: -1, 15: -1, 16: -1,
+    17: 2,  # Pole
+    18: -1,
+    19: 2,  # Traffic light
+    20: 2,  # Traffic sign
+    21: 3,  # Vegetation
+    22: 3,  # Terrain
+    23: 4,  # Sky
+    24: 5,  # Person
+    25: 5,  # Rider
+    26: 6,  # Car
+    27: 6,  # Truck
+    28: 6,  # Bus
+    29: -1, 30: -1,
+    31: 6,  # Train
+    32: 6,  # Motorcycle
+    33: 6,  # Bicycle
 }
 
 class GTA5Dataset(Dataset):
-    def __init__(self, root_dir, img_size=(384, 384)):
+    def __init__(self, root_dir, img_size):
         """
         Args:
             root_dir: GTA5 数据集根目录 (e.g., '../mtl_dataset/gta5')
@@ -79,7 +78,7 @@ class GTA5Dataset(Dataset):
         self.targets.sort()
 
         # 预计算映射数组
-        self.mapping = np.zeros(256, dtype=np.int64) + 255
+        self.mapping = np.zeros(256, dtype=np.int64) - 1
         for k, v in GTA5_TO_7_CLASSES.items():
             if k >= 0:
                 self.mapping[k] = v
@@ -97,9 +96,8 @@ class GTA5Dataset(Dataset):
         label = Image.open(label_path)
 
         # Resize (Nearest for label)
-        img = img.resize(self.img_size, Image.BILINEAR)
-        label = label.resize(self.img_size, Image.NEAREST)
-
+        img = img.resize((self.img_size[1], self.img_size[0]), Image.BILINEAR)
+        label = label.resize((self.img_size[1], self.img_size[0]), Image.NEAREST)
         # 随机水平翻转 (Sim-to-Real 训练时增强很重要)
         if random.random() < 0.5:
             img = transforms.functional.hflip(img)

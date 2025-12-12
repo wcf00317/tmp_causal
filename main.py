@@ -88,7 +88,7 @@ def main(config_path):
             logging.info("🏠 Mode: NYUv2 (LibMTL format - Folder based)")
             # [MODIFIED] 不再读取 HDF5，而是直接实例化 Train/Val Dataset
             # LibMTL 格式中，train 和 val 是分开的文件夹，通过 mode 参数控制
-            train_dataset = NYUv2Dataset(root_dir=dataset_path, mode='train')
+            train_dataset = NYUv2Dataset(root_dir=dataset_path, mode='train',augmentation = data_cfg.get('augmentation', False))
             val_dataset = NYUv2Dataset(root_dir=dataset_path, mode='val')
             full_dataset = train_dataset  # 仅用于获取属性，不影响逻辑
 
@@ -160,7 +160,7 @@ def main(config_path):
         # LibMTL 默认配置: Adam, lr=1e-4, weight_decay=1e-5
         optimizer = optim.Adam([
             {'params': backbone_params, 'lr': base_lr},  # Backbone LR
-            {'params': head_params, 'lr': base_lr * 10}  # Head LR 通常大一些 (可选，或者保持一致)
+            {'params': head_params, 'lr': base_lr }  # Head LR 通常大一些 (可选，或者保持一致)
         ], lr=base_lr, weight_decay=config['training']['weight_decay'])
 
         criterion = AdaptiveCompositeLoss(config['losses'], dataset_type).to(device)

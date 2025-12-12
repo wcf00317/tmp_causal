@@ -8,7 +8,60 @@ from .heads.albedo_head import AlbedoHead
 from .heads.normal_head import NormalHead
 from .heads.light_head import LightHead
 from .layers.shading import shading_from_normals
+from torch.utils.checkpoint import checkpoint
 
+
+class ASPPConv(nn.Sequential):
+    def __init__(self, in_channels, out_channels, dilation):
+        modules = [
+            nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU()
+        ]
+        super(ASPPConv, self).__init__(*modules)
+
+class ASPPPooling(nn.Sequential):
+    def __init__(self, in_channels, out_channels):
+        super(ASPPPooling, self).__init__(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU())
+
+    def forward(self, x):
+        size = x.shape[-2:]
+        x = super(ASPPPooling, self).forward(x)
+        return F.interpolate(x, size=size, mode='bilinear', align_corners=False)
+
+class ASPP(nn.Module):
+    def __init__(self, in_channels, out_channels=256, atrous_rates=[12, 24, 36]):
+        super(ASPP, self).__init__()
+        modules = []
+        modules.append(nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU()))
+
+        rate1, rate2, rate3 = tuple(atrous_rates)
+        modules.append(ASPPConv(in_channels, out_channels, rate1))
+        modules.append(ASPPConv(in_channels, out_channels, rate2))
+        modules.append(ASPPConv(in_channels, out_channels, rate3))
+        modules.append(ASPPPooling(in_channels, out_channels))
+
+        self.convs = nn.ModuleList(modules)
+
+        self.project = nn.Sequential(
+            nn.Conv2d(5 * out_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+            nn.Dropout(0.5))
+
+    def forward(self, x):
+        res = []
+        for conv in self.convs:
+            res.append(conv(x))
+        res = torch.cat(res, dim=1)
+        return self.project(res)
 
 class GatedFiLM(nn.Module):
     """用 z_p 对主特征做通道级缩放/平移；scale_cap 限制 z_p 的影响力。"""
@@ -73,55 +126,61 @@ class ZpDepthRefiner(nn.Module):
 
 
 class GatedSegDepthDecoder(nn.Module):
-    def __init__(self, main_in_channels: int, z_p_channels: int, out_channels: int, scale_cap: float = 1.0):
+    def __init__(self, main_in_channels: int, z_p_channels: int, out_channels: int, scale_cap: float = 1.0,
+                 use_sigmoid=False):
         super().__init__()
-
         self.output_channels = out_channels
+        self.use_sigmoid = use_sigmoid  # [NEW] 开关
+        aspp_dim = 256
+        self.aspp = ASPP(in_channels=main_in_channels, out_channels=aspp_dim, atrous_rates=[12, 24, 36])
+
         self.pre_smooth = nn.Sequential(
-            nn.Conv2d(main_in_channels, main_in_channels, kernel_size=3, padding=1, groups=1, bias=False),
-            nn.BatchNorm2d(main_in_channels),
+            nn.Conv2d(aspp_dim, aspp_dim, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(aspp_dim),
             nn.ReLU(inplace=True)
         )
 
+        # [MODIFIED] 使用 Upsample + Conv 替代 ConvTranspose2d
         def _up(in_c, out_c, do_resize=True):
             layers = []
             if do_resize:
-                return nn.Sequential(
-                    # kernel_size=4, stride=2, padding=1 是标准的 2倍上采样配置
-                    # 它能完美地将尺寸翻倍 (e.g., 24 -> 48) 且没有棋盘伪影
-                    nn.ConvTranspose2d(in_c, out_c, kernel_size=4, stride=2, padding=1, bias=False),
-                    nn.BatchNorm2d(out_c),
-                    nn.ReLU(inplace=True)
-                )
-            layers += [
-                nn.Conv2d(in_c, out_c, 3, padding=1, bias=False),
-                nn.BatchNorm2d(out_c),
-                nn.ReLU(inplace=True),
-            ]
+                layers.append(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False))
+                # 只有上采样后紧接一个卷积，才能平滑特征
+                layers.append(nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False))
+                layers.append(nn.BatchNorm2d(out_c))
+                layers.append(nn.ReLU(inplace=True))
+            else:
+                # 不放大的层保持原样
+                layers.append(nn.Conv2d(in_c, out_c, 3, padding=1, bias=False))
+                layers.append(nn.BatchNorm2d(out_c))
+                layers.append(nn.ReLU(inplace=True))
             return nn.Sequential(*layers)
 
-        # 14→28→56→112（前三个块放大），第4个块不放大，只做卷积
-        self.up1 = _up(main_in_channels, 256, do_resize=True)
+        # 结构保持不变：256->128->64->64
+        self.up1 = _up(main_in_channels, 256, do_resize=False)
         self.up2 = _up(256, 128, do_resize=True)
         self.up3 = _up(128, 64, do_resize=True)
-        self.up4 = _up(64, 64, do_resize=False)  # 保持 112
+        self.up4 = _up(64, 64, do_resize=False)
 
-        # FiLM 的通道要与 up4 输出一致（64）
+        # FiLM 保持不变
         self.g1 = GatedFiLM(256, z_p_channels, scale_cap)
         self.g2 = GatedFiLM(128, z_p_channels, scale_cap)
         self.g3 = GatedFiLM(64, z_p_channels, scale_cap)
         self.g4 = GatedFiLM(64, z_p_channels, scale_cap)
 
-        # PixelShuffle: 112→224，通道 64→16
+        # PixelShuffle 之后通道数变为 64/4 = 16
         self.ps = nn.PixelShuffle(2)
 
-        # PS 后通道是 64/4=16
+        # 最终卷积
         self.final_conv = nn.Conv2d(16, out_channels, 3, padding=1)
 
     def forward(self, main_feat, z_p_feat, use_film: bool = True, detach_zp: bool = False):
-        # 绝不对 z_p_feat 做 detach，确保有梯度回传
         zpf = z_p_feat
-        x = self.pre_smooth(main_feat)
+
+        # [NEW] 2. 先通过 ASPP 提取全局上下文
+        # ASPP 会极大地扩大感受野，这对于 Cityscapes 的深度估计至关重要
+        x = self.aspp(main_feat)
+        x = self.pre_smooth(x)
 
         x = self.up1(x);
         x = self.g1(x, zpf) if use_film else x
@@ -131,9 +190,15 @@ class GatedSegDepthDecoder(nn.Module):
         x = self.g3(x, zpf) if use_film else x
         x = self.up4(x);
         x = self.g4(x, zpf) if use_film else x
-        x = self.ps(x)
-        return self.final_conv(x)
 
+        x = self.ps(x)
+        out = self.final_conv(x)
+
+        # [NEW] 如果是深度任务且数据归一化了，加上 Sigmoid
+        if self.use_sigmoid:
+            out = torch.sigmoid(out)
+
+        return out
 
 class SegDepthDecoder(nn.Module):
     def __init__(self, input_channels, output_channels):
@@ -187,7 +252,7 @@ class CausalMTLModel(nn.Module):
             )
             # ResNet 输出是 [256, 512, 1024, 2048]
             # 我们需要把它们全部投影到一个统一的维度 (e.g. 768) 以模拟 ViT
-            target_dim = 768
+            target_dim = 256
             self.resnet_adapters = nn.ModuleList([
                 nn.Conv2d(in_c, target_dim, kernel_size=1)
                 for in_c in self.encoder.feature_dims
@@ -216,8 +281,6 @@ class CausalMTLModel(nn.Module):
         self.projector_p_seg = nn.Conv2d(combined_feature_dim, self.latent_dim_p, kernel_size=1)
         self.projector_p_depth = nn.Conv2d(combined_feature_dim, self.latent_dim_p, kernel_size=1)
         self.projector_p_normal = nn.Conv2d(combined_feature_dim, self.latent_dim_p, kernel_size=1)
-        # Scene-level projector
-        self.projector_p_scene = MLP(encoder_feature_dim, self.latent_dim_p)
 
         # 统一投影到 PROJ_CHANNELS 供任务解码
         PROJ_CHANNELS = 256
@@ -238,7 +301,6 @@ class CausalMTLModel(nn.Module):
         # 任务分支
         decoder_main_dim = PROJ_CHANNELS * 2
         num_seg_classes = model_config.get('num_seg_classes', 40)
-        num_scene_classes = model_config['num_scene_classes']
         self.zp_seg_refiner = ZpSegRefiner(c_in=PROJ_CHANNELS, out_classes=num_seg_classes, alpha=0.2)
 
         self.predictor_seg = GatedSegDepthDecoder(
@@ -247,12 +309,10 @@ class CausalMTLModel(nn.Module):
         )
         self.predictor_depth = GatedSegDepthDecoder(
             main_in_channels=decoder_main_dim, z_p_channels=PROJ_CHANNELS,
-            out_channels=1, scale_cap=1.0
+            out_channels=1, scale_cap=1.0, use_sigmoid=True
         )
         self.predictor_normal = GatedSegDepthDecoder(decoder_main_dim, PROJ_CHANNELS, 3, scale_cap=1.0)
 
-        predictor_scene_input_dim = encoder_feature_dim + self.latent_dim_s + self.latent_dim_p
-        self.predictor_scene = MLP(predictor_scene_input_dim, num_scene_classes)
         self.decoder_zp_depth = SegDepthDecoder(self.latent_dim_p, 1)
         self.decoder_zp_normal = SegDepthDecoder(self.latent_dim_p, 3)
 
@@ -329,8 +389,6 @@ class CausalMTLModel(nn.Module):
         z_p_depth = z_p_depth_map.mean(dim=[2, 3])
         z_p_normal = z_p_normal_map.mean(dim=[2, 3])
 
-        # Scene Projector 依然使用 h
-        z_p_scene = self.projector_p_scene(h)
 
         # 2. 统一投影给任务解码器 (Unified Decoder Projections)
         f_proj = self.proj_f(combined_feat)
@@ -386,9 +444,6 @@ class CausalMTLModel(nn.Module):
         # 法线归一化 (关键步骤)
         pred_normal = F.normalize(pred_normal, p=2, dim=1)
 
-        # === Task 4: Scene Classification ===
-        scene_predictor_input = torch.cat([h, z_s, z_p_scene], dim=1)
-        pred_scene = self.predictor_scene(scene_predictor_input)
 
         # ---------- 4. 辅助与重构 (Aux / Recon) ----------
 
@@ -420,13 +475,11 @@ class CausalMTLModel(nn.Module):
             # 潜变量
             'z_s': z_s, 'z_p_seg': z_p_seg, 'z_p_depth': z_p_depth,
             'z_p_normal': z_p_normal,  # [NEW]
-            'z_p_scene': z_p_scene,
             'z_s_map': z_s_map, 'z_p_seg_map': z_p_seg_map, 'z_p_depth_map': z_p_depth_map,
 
             # 任务输出
             'pred_seg': pred_seg,
             'pred_depth': pred_depth,
-            'pred_scene': pred_scene,
             'pred_normal': pred_normal,  # [NEW] 显式命名
 
             # [CRITICAL] 评估器 Evaluator 会寻找 'normals' 键

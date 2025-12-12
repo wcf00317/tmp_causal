@@ -1,71 +1,73 @@
-# configs/resnet/causal_cityscapes_v8_texture.yaml
+# configs/diagnose_depth_limit_resnet.yaml
+# 修复版：使用 "causal" 模式但只训练深度，用于探测 ResNet50 架构的深度拟合极限
 
 data:
   type: "cityscapes"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/cityscape_preprocess"
+  # 诊断时不需要太大 Batch，目的是看能不能过拟合
   batch_size: 16
   num_workers: 4
+  # 保持和你主实验一致的分辨率，看看这个分辨率下 Abs Err 能降到多少
   img_size: [128, 256]
-  pin_memory: True
+  pin_memory: true
 
 model:
+  # [CRITICAL Fix] 必须用 "causal"，因为 SingleTaskModel 代码不支持 resnet50
   type: "causal"
   encoder_name: "resnet50"
-  pretrained: True
+  pretrained: true
   latent_dim_s: 128
   latent_dim_p: 256
-  z_s_bottleneck_noise: 0.1
+  # 即使只测深度，这些参数也需要占位以防报错
+  num_seg_classes: 7
   num_scene_classes: 1
-  num_seg_classes: 19
-  gating_scale_cap: 0.3
+
   decomposition:
     enabled: true
-    normal_head_hidden: 128
-    albedo_head_hidden: 128
     light_head:
       sh_degree: 2
-      grayscale_prior: true
 
 training:
-  seed: 8888
+  seed: 2025
   epochs: 100
-  optimizer: "Adam"
-  learning_rate: 0.0001
-  weight_decay: 0.00001
-  enable_training: True
+  optimizer: "AdamW"
+  learning_rate: 0.001   # [高 LR] 1e-3，为了快速过拟合测试
+  weight_decay: 0.0      # [无正则] 关掉正则化，方便逼近极限
 
-  stage1_epochs: 30      # 充分预热
-  ind_warmup_epochs: 20
+  # [关键策略] 直接进入 Stage 2 (全解冻模式)，跳过预热
+  # 这样所有参数（Encoder + Decoder）从第一步开始都全力服务于深度
+  stage0_epochs: 0
+  stage1_epochs: 0
+  ind_warmup_epochs: 0
 
   lr_scheduler:
-    type: "cosine"
-    warmup_epochs: 5
-    min_lr_factor: 0.01
+    type: "step"
+    step_size: 50
+    gamma: 0.5
 
 losses:
-  # 1. 任务
-  lambda_seg: 10.0
-  lambda_depth: 25.0      # [MAX] 再次强调深度
+  # === 所有的权重都设为 0，只保留 Depth ===
+  lambda_seg: 0.0
+
+  # [重点] 这里的 1.0 是 L1 Loss 的直接权重
+  # 如果 1.0 下降慢，可以改成 10.0 或 50.0，但在单任务下 1.0 通常足够观察趋势
+  lambda_depth: 1.0
+
   lambda_normal: 0.0
   lambda_scene: 0.0
 
-  # 2. 因果
-  lambda_independence: 1.0 # [KEEP] 保持现状，不过度干扰 z_p
+  # 关闭解耦约束
+  lambda_independence: 0.0
 
-  # 3. 重构 (强化 z_p 的学习能力)
-  alpha_recon_geom: 2.0
-  beta_recon_app: 5.0      # [BOOST] 2.0 -> 5.0，强迫 z_p 记清每一个纹理细节
-  lambda_l1_recon: 2.0     # 配合 L1 提升清晰度
+  # 关闭重构（为了纯粹测试 "Input -> Depth" 的拟合能力）
+  # 如果你想测试 "zs -> Depth" 的能力，也可以保留 alpha_recon_geom
+  alpha_recon_geom: 0.0
+  beta_recon_app: 0.0
+  lambda_l1_recon: 0.0
 
-  # 4. 辅助
-  alpha_recon_geom_aux: 0.5
-  beta_recon_app_aux: 1.0
-  lambda_depth_zp: 1.0     # [BOOST] 0.5 -> 1.0，让 z_p 对深度的贡献更直接
+  # 关闭边缘一致性等正则项，只看最原始的拟合能力
+  lambda_edge_consistency: 0.0
 
-  # 5. 分解正则
-  lambda_img: 2.0
-  lambda_alb_tv: 0.01
-  lambda_alb_chroma: 0.01
-  lambda_sh_gray: 0.1
-  lambda_norm: 0.1
-  lambda_xcov: 0.05
+  # 关闭分解
+  lambda_img: 0.0
+  lambda_sh_gray: 0.0

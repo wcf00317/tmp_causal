@@ -5,8 +5,31 @@ import numpy as np
 from torch.utils.data import Dataset
 
 
+class RandomScaleCrop(object):
+    def __init__(self, scale=[1.0, 1.2, 1.5]):
+        self.scale = scale
+
+    def __call__(self, img, label, depth, normal):
+        # img: [C, H, W], label: [H, W], depth: [1, H, W], normal: [3, H, W]
+        height, width = img.shape[-2:]
+        sc = self.scale[random.randint(0, len(self.scale) - 1)]
+        h, w = int(height / sc), int(width / sc)
+        i = random.randint(0, height - h)
+        j = random.randint(0, width - w)
+
+        # Bilinear for continuous (img, normal), Nearest for discrete/depth (label, depth)
+        img_ = F.interpolate(img[None, :, i:i + h, j:j + w], size=(height, width), mode='bilinear',
+                             align_corners=True).squeeze(0)
+        label_ = F.interpolate(label[None, None, i:i + h, j:j + w].float(), size=(height, width),
+                               mode='nearest').squeeze(0).squeeze(0).long()
+        depth_ = F.interpolate(depth[None, :, i:i + h, j:j + w], size=(height, width), mode='nearest').squeeze(0)
+        normal_ = F.interpolate(normal[None, :, i:i + h, j:j + w], size=(height, width), mode='bilinear',
+                                align_corners=True).squeeze(0)
+
+        return img_, label_, depth_ / sc, normal_
+
 class NYUv2Dataset(Dataset):
-    def __init__(self, root_dir, mode='train'):
+    def __init__(self, root_dir, mode='train', augmentation=False):
         """
         纯净版 NYUv2 数据集读取类。
         直接读取 LibMTL 预处理好的 .npy 文件。
@@ -19,6 +42,7 @@ class NYUv2Dataset(Dataset):
         super().__init__()
         self.root = os.path.expanduser(root_dir)
         self.mode = mode
+        self.augmentation = augmentation
 
         # LibMTL 文件夹结构: root/train/image/*.npy
         sub_dir = 'train' if mode == 'train' else 'val'
@@ -71,6 +95,18 @@ class NYUv2Dataset(Dataset):
 
         # Normal: [H, W, 3] -> [3, H, W]
         normal = torch.from_numpy(np.moveaxis(normal_np, -1, 0)).float()
+
+        if self.augmentation:
+            print("🔥 Data Augmentation (RandomScaleCrop + Flip) is ENABLED via Config.")
+            # 1. Random Scale Crop
+            image, semantic, depth, normal = RandomScaleCrop()(image, semantic, depth, normal)
+            # 2. Random Horizontal Flip
+            if torch.rand(1) < 0.5:
+                image = torch.flip(image, dims=[2])
+                semantic = torch.flip(semantic, dims=[1])
+                depth = torch.flip(depth, dims=[2])
+                normal = torch.flip(normal, dims=[2])
+                normal[0, :, :] = - normal[0, :, :]
 
         # ==================================================
         # 3. 构造返回字典 (纯净数据)

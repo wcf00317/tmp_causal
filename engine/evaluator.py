@@ -120,7 +120,8 @@ def evaluate(model, val_loader, criterion, device, stage, data_type):
 
     # 1. 基础任务 (Seg/Depth 总是打印)
     task_str = f"  - Seg:   mIoU={final_miou:.4f}, Pixel Acc={final_pixel_acc:.4f}\n"
-    task_str += f"  - Depth: Abs Err={final_abs_err:.4f}, Rel Err={final_rel_err:.4f}"
+    if 'gta5' not in str(data_type).lower():
+        task_str += f"  - Depth: Abs Err={final_abs_err:.4f}, Rel Err={final_rel_err:.4f}"
 
     # 2. 法线 (Normal) - 根据 data_type 决定是否打印
     if 'nyuv2' in str(data_type).lower():

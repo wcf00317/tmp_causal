@@ -98,7 +98,7 @@ class ResNetEncoder(nn.Module):
         # LibMTL 使用 resnet_dilated，通常意味着最后一块使用空洞卷积
         # replace_stride_with_dilation=[False, False, True] 会让 Layer4 的 Stride=1, Dilation=2
         # 这样输出的特征图尺寸是 1/16 (OS=16)，比标准的 1/32 更适合密集预测
-        replace_stride = [False, False, True] if dilated else [False, False, False]
+        replace_stride = [False, True, True] if dilated else [False, False, False]
 
         weights = ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
         self.backbone = models.resnet50(
@@ -330,7 +330,7 @@ class ResNetDecoderWithDeepSupervision(nn.Module):
 
         # 主输出路径
         self.final_upsample = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False), # 112x112 -> 224x224
+            #nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False), # 112x112 -> 224x224
             nn.Conv2d(64, output_channels, kernel_size=3, padding=1)
         )
 

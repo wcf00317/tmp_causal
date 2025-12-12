@@ -1,14 +1,9 @@
-# configs/resnet/causal_nyuv2_v13_strong_indep.yaml
-# V13 策略：强力解耦 (Indep=1.0) + 高压深度 (Depth=20.0)
-# 旨在通过强制剥离纹理干扰，倒逼 z_s 学出更纯粹的几何结构
-
 data:
   type: "nyuv2"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
-  batch_size: 8
+  batch_size: 8   # 如果显存允许，尽量开大
   num_workers: 4
-  img_size: [288, 384]
-  pin_memory: True
+  img_size: [288, 384] # 保持这个分辨率，或者尝试 [384, 384] 如果显存够
 
 model:
   type: "causal"
@@ -16,10 +11,9 @@ model:
   pretrained: True
   latent_dim_s: 128
   latent_dim_p: 256
-  z_s_bottleneck_noise: 0.1
-  num_scene_classes: 1
-  num_seg_classes: 40
-  gating_scale_cap: 0.3
+  z_s_bottleneck_noise: 0.1 # 稍微加点噪声防止过拟合
+  
+  # 关键：开启分解头，利用你的 decomposition loss 辅助 z_p 学习
   decomposition:
     enabled: true
     normal_head_hidden: 128
@@ -29,16 +23,16 @@ model:
       grayscale_prior: true
 
 training:
-  seed: 2025
-  epochs: 200
-  optimizer: "Adam"
+  seed: 2024           # 固定种子
+  epochs: 200          # 冲击 SOTA 建议 200
+  optimizer: "AdamW"   # AdamW 比 Adam 泛化性更好
   learning_rate: 0.0001
-  weight_decay: 0.00001
-  enable_training: True
-
-  # 延长预热，因为强解耦需要时间适应
-  stage1_epochs: 30
-  ind_warmup_epochs: 30
+  weight_decay: 0.0001   # 增加一点 decay 防止过拟合
+  
+  # === 时间表控制 ===
+  stage0_epochs: 5     # 仅训练分解 (A*S=I)
+  stage1_epochs: 40    # 强力预热 z_s (20% 时间)
+  ind_warmup_epochs: 40 # CKA 慢慢介入
 
   lr_scheduler:
     type: "cosine"
@@ -46,29 +40,26 @@ training:
     min_lr_factor: 0.01
 
 losses:
-  # 1. 任务损失 (保持 Depth 高压)
-  lambda_seg: 5.0         # 适中，给 Depth 让路
-  lambda_normal: 5.0      # 适中
-  lambda_depth: 20.0      # [HIGH] 继续死磕 Abs Err
+  # === 核心任务 (高压策略) ===
+  lambda_seg: 10.0
+  lambda_depth: 20.0   # [重点] 压低 RMSE
+  lambda_normal: 10.0  # [重点] 优化角度误差
+  lambda_scene: 0.0
 
-  # 2. 因果约束 (核心变量)
-  # [CRITICAL] 提升至 1.0。强迫 CKA 降到 0.1 以下。
-  lambda_independence: 1.0
+  # === 解耦 ===
+  lambda_independence: 0.1 # [重点] 适度解耦
 
-  # 3. 重构损失 (适中，辅助解耦)
+  # === 重构 (辅助) ===
+  # 既然开启了 decomposition，可以适当降低纯像素重构的权重，依赖物理重构
   alpha_recon_geom: 2.0
   beta_recon_app: 2.0
   lambda_l1_recon: 1.0
 
-  # 4. 辅助
-  alpha_recon_geom_aux: 0.5
-  beta_recon_app_aux: 0.5
-  lambda_depth_zp: 0.5
+  # === 分解正则 (利用你代码里的 Albedo/Shading) ===
+  lambda_img: 5.0        # I_hat = A*S，这个权重要高，保证 z_p 学到真正的 Albedo
+  lambda_alb_tv: 0.01    # 平滑 Albedo
+  lambda_sh_gray: 0.1    # 白光假设
+  lambda_xcov: 0.05      # 抑制 Albedo 和 Normal 的相关性 (另一种解耦)
 
-  # 5. 分解正则
-  lambda_img: 2.0         # 保持一定权重，让解耦后的特征能重构回图片
-  lambda_alb_tv: 0.01
-  lambda_alb_chroma: 0.01
-  lambda_sh_gray: 0.1
-  lambda_norm: 0.1
-  lambda_xcov: 0.05
+  # === 边缘一致性 ===
+  lambda_edge_consistency: 1.0 # 强化边缘

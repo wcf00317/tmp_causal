@@ -1,73 +1,63 @@
-# configs/resnet/causal_nyuv2_v16_task_supremacy.yaml
-# V16 策略：几乎关闭所有辅助任务，所有主任务权重拉满
-# 目的：消除所有额外干扰，把 ResNet 的能力全部用于刷榜
-
 data:
   type: "nyuv2"
+  # 确保路径正确
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
-  batch_size: 8
+  # 诊断时 Batch Size 可以小一点，或者保持 8
+  batch_size: 2
   num_workers: 4
-  img_size: [288, 384]
-  pin_memory: True
+  img_size: [288, 384] # 保持和 SOTA 一致的分辨率
+  pin_memory: true
 
 model:
-  type: "causal"
+  type: "causal"         # 借用 Causal 架构来测 ResNet50
   encoder_name: "resnet50"
-  pretrained: True
+  pretrained: true
   latent_dim_s: 128
   latent_dim_p: 256
-  z_s_bottleneck_noise: 0.1
-  num_scene_classes: 1
+  # NYUv2 参数占位
   num_seg_classes: 40
-  gating_scale_cap: 0.3
+  num_scene_classes: 27
+
   decomposition:
     enabled: true
-    normal_head_hidden: 128
-    albedo_head_hidden: 128
     light_head:
       sh_degree: 2
-      grayscale_prior: true
 
 training:
-  seed: 888
-  epochs: 100
-  optimizer: "Adam"
-  learning_rate: 0.0001
-  weight_decay: 0.00001
-  enable_training: True
+  seed: 2025
+  epochs: 100            # 跑久一点看极限
+  optimizer: "AdamW"
+  learning_rate: 0.0005  # 稍微调大 LR 激进一点
+  weight_decay: 0.0      # 【关键】关掉正则，我们要看模型能不能“记住”数据
 
-  # 缩短预热，直接进入多任务
-  stage1_epochs: 10
-  ind_warmup_epochs: 10
+  # 【关键】跳过所有预热，直接全参数训练
+  stage0_epochs: 0
+  stage1_epochs: 0
+  ind_warmup_epochs: 0
 
   lr_scheduler:
-    type: "cosine"
-    warmup_epochs: 5
-    min_lr_factor: 0.01
+    type: "step"
+    step_size: 50
+    gamma: 0.5
 
 losses:
-  # 1. 任务损失 (全员拉满)
-  lambda_seg: 10.0        # [HIGH] 恢复高位
-  lambda_normal: 15.0     # [EXTREME] 极高法线权重
-  lambda_depth: 30.0      # [EXTREME] 极高深度权重
+  # === 关闭所有其他任务 ===
+  lambda_seg: 0.0
+  lambda_normal: 0.0
+  lambda_scene: 0.0
 
-  # 2. 因果约束 (几乎关闭)
-  lambda_independence: 0.01
+  # === 深度权重 ===
+  # NYUv2 用的是 ScaleInvariantLoss，数值通常在 0.1~0.5 之间
+  # 不需要设像 Cityscapes (L1) 那么大，设 10.0 足够观测了
+  lambda_depth: 10.0
 
-  # 3. 重构损失 (几乎关闭)
-  alpha_recon_geom: 0.1
-  beta_recon_app: 0.1
-  lambda_l1_recon: 0.1
+  # 关闭解耦和重构，只测 "Input -> Depth" 的拟合能力
+  lambda_independence: 0.0
+  alpha_recon_geom: 0.0
+  beta_recon_app: 0.0
+  lambda_l1_recon: 0.0
 
-  # 4. 辅助
-  alpha_recon_geom_aux: 0.0
-  beta_recon_app_aux: 0.0
-  lambda_depth_zp: 0.0
-
-  # 5. 分解正则 (关闭)
+  # 关闭正则
+  lambda_edge_consistency: 0.0
   lambda_img: 0.0
-  lambda_alb_tv: 0.0
-  lambda_alb_chroma: 0.0
   lambda_sh_gray: 0.0
-  lambda_norm: 0.0
-  lambda_xcov: 0.0
