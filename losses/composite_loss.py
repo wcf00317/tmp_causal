@@ -103,8 +103,10 @@ def seg_edge_consistency_loss(seg_logits, geom_from_zs, weight=0.1, tau=0.1):
     gx_g, gy_g = _norm(gx_g), _norm(gy_g)
 
     edge_mag = (gx_g.abs() + gy_g.abs())
+    edge_mag_flat = edge_mag.view(edge_mag.size(0), -1).float()
+    q = torch.quantile(edge_mag_flat, 0.70, dim=1, keepdim=True)
     # 每张图动态取高梯度分位（比如 top 30%）
-    q = torch.quantile(edge_mag.view(edge_mag.size(0), -1), 0.70, dim=1, keepdim=True)  # 0.6~0.8 可调
+    #q = torch.quantile(edge_mag.view(edge_mag.size(0), -1), 0.70, dim=1, keepdim=True)  # 0.6~0.8 可调
     q = q.view(-1, 1, 1, 1)
     mask = (edge_mag > q).float()
 

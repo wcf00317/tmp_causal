@@ -130,71 +130,41 @@ class GatedSegDepthDecoder(nn.Module):
                  use_sigmoid=False):
         super().__init__()
         self.output_channels = out_channels
-        self.use_sigmoid = use_sigmoid  # [NEW] 开关
-        aspp_dim = 256
-        self.aspp = ASPP(in_channels=main_in_channels, out_channels=aspp_dim, atrous_rates=[12, 24, 36])
+        self.use_sigmoid = use_sigmoid
 
-        self.pre_smooth = nn.Sequential(
-            nn.Conv2d(aspp_dim, aspp_dim, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(aspp_dim),
-            nn.ReLU(inplace=True)
+        # [1] ASPP 放在最前面，负责降维和提取上下文
+        # 无论输入 main_in_channels 是多少 (1024/3072)，ASPP 都把它压到 256
+        aspp_out = 256
+        self.aspp = ASPP(in_channels=main_in_channels, out_channels=aspp_out, atrous_rates=[12, 24, 36])
+
+        # [2] 核心融合层 (Gated FiLM)
+        # 我们只需要做一次高质量的融合，不需要做4次
+        self.film_fusion = GatedFiLM(aspp_out, z_p_channels, scale_cap)
+
+        # [3] 最终预测头 (轻量化)
+        # 包含 3x3 卷积整理特征 -> GN -> ReLU -> 1x1 输出
+        self.head = nn.Sequential(
+            nn.Conv2d(aspp_out, 256, 3, padding=1, bias=False),
+            nn.GroupNorm(32, 256),  # [关键] 使用 GroupNorm 防止 BS=2 崩溃
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, out_channels, 1)
         )
 
-        # [MODIFIED] 使用 Upsample + Conv 替代 ConvTranspose2d
-        def _up(in_c, out_c, do_resize=True):
-            layers = []
-            if do_resize:
-                layers.append(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False))
-                # 只有上采样后紧接一个卷积，才能平滑特征
-                layers.append(nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False))
-                layers.append(nn.BatchNorm2d(out_c))
-                layers.append(nn.ReLU(inplace=True))
-            else:
-                # 不放大的层保持原样
-                layers.append(nn.Conv2d(in_c, out_c, 3, padding=1, bias=False))
-                layers.append(nn.BatchNorm2d(out_c))
-                layers.append(nn.ReLU(inplace=True))
-            return nn.Sequential(*layers)
-
-        # 结构保持不变：256->128->64->64
-        self.up1 = _up(main_in_channels, 256, do_resize=False)
-        self.up2 = _up(256, 128, do_resize=True)
-        self.up3 = _up(128, 64, do_resize=True)
-        self.up4 = _up(64, 64, do_resize=False)
-
-        # FiLM 保持不变
-        self.g1 = GatedFiLM(256, z_p_channels, scale_cap)
-        self.g2 = GatedFiLM(128, z_p_channels, scale_cap)
-        self.g3 = GatedFiLM(64, z_p_channels, scale_cap)
-        self.g4 = GatedFiLM(64, z_p_channels, scale_cap)
-
-        # PixelShuffle 之后通道数变为 64/4 = 16
-        self.ps = nn.PixelShuffle(2)
-
-        # 最终卷积
-        self.final_conv = nn.Conv2d(16, out_channels, 3, padding=1)
-
     def forward(self, main_feat, z_p_feat, use_film: bool = True, detach_zp: bool = False):
-        zpf = z_p_feat
-
-        # [NEW] 2. 先通过 ASPP 提取全局上下文
-        # ASPP 会极大地扩大感受野，这对于 Cityscapes 的深度估计至关重要
+        # 1. 提取特征 (H/8)
         x = self.aspp(main_feat)
-        x = self.pre_smooth(x)
 
-        x = self.up1(x);
-        x = self.g1(x, zpf) if use_film else x
-        x = self.up2(x);
-        x = self.g2(x, zpf) if use_film else x
-        x = self.up3(x);
-        x = self.g3(x, zpf) if use_film else x
-        x = self.up4(x);
-        x = self.g4(x, zpf) if use_film else x
+        # 2. 因果干预 (融合 z_p)
+        if use_film:
+            x = self.film_fusion(x, z_p_feat)
 
-        x = self.ps(x)
-        out = self.final_conv(x)
+        # 3. 生成预测 (H/8)
+        out = self.head(x)
 
-        # [NEW] 如果是深度任务且数据归一化了，加上 Sigmoid
+        # 4. 直接上采样回原图 (H) - 像 LibMTL 一样
+        # scale_factor=8 对应 ResNet OS=8
+        out = F.interpolate(out, scale_factor=8, mode='bilinear', align_corners=True)
+
         if self.use_sigmoid:
             out = torch.sigmoid(out)
 

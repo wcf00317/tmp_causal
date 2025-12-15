@@ -169,17 +169,22 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
     total_train_loss = 0.0
     pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Training]", leave=False)
 
-    # 梯度累积步数 (物理 BS=8 -> 逻辑 BS=16/32, 视显存而定)
-    # 如果不需要累积，设为 1
-    accumulation_steps = 1
+    # [FIX 1] 自动计算累积步数 (物理 BS -> 目标 BS 16)
+    # 如果物理 BS=2，则累积 8 步
+    target_bs = 16
+    physical_bs = train_loader.batch_size
+    accumulation_steps = max(1, target_bs // physical_bs)
 
     optimizer.zero_grad(set_to_none=True)
+
+    # [FIX 2] Scaler 必须在循环外初始化！
+    scaler = GradScaler()
 
     for i, batch in enumerate(pbar):
         batch = {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
         rgb = batch['rgb']
 
-        scaler = GradScaler()
+        # 开启混合精度
         with autocast():
             outputs = model(rgb, stage=stage)
 
@@ -195,8 +200,12 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
                 raise ValueError("criterion must return dict or (total_loss, dict).")
 
             loss_normalized = total_loss / accumulation_steps
-            loss_normalized.backward()
 
+        # [FIX 3] 必须使用 scaler.scale() 进行反向传播
+        # 原代码错写成了 loss_normalized.backward()
+        scaler.scale(loss_normalized).backward()
+
+        # 梯度更新
         if (i + 1) % accumulation_steps == 0:
             scaler.step(optimizer)
             scaler.update()
@@ -205,15 +214,15 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
         total_train_loss += float(total_loss.item())
         pbar.set_postfix(loss=f"{total_loss.item():.4f}")
 
-    # 处理剩余梯度
+    # 处理剩余梯度 (如果有)
     if len(train_loader) % accumulation_steps != 0:
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         optimizer.zero_grad(set_to_none=True)
 
     avg_train_loss = total_train_loss / max(1, len(train_loader))
     logging.info(f"Epoch {epoch + 1} - Average Training Loss: {avg_train_loss:.4f}")
     return avg_train_loss
-
 
 def calculate_improvement(base_metrics, current_metrics, data_type='nyuv2'):
     """相对提升率计算 (LibMTL 对齐)"""

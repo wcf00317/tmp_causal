@@ -5,7 +5,7 @@ data:
   type: "cityscapes"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/cityscape_preprocess"
   # 诊断时不需要太大 Batch，目的是看能不能过拟合
-  batch_size: 16
+  batch_size: 4
   num_workers: 4
   # 保持和你主实验一致的分辨率，看看这个分辨率下 Abs Err 能降到多少
   img_size: [128, 256]
