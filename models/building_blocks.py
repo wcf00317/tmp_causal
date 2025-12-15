@@ -315,12 +315,12 @@ class ResNetDecoderWithDeepSupervision(nn.Module):
             nn.ReLU(True)
         )
         self.start_size = start_size
-
+        self.attention = SelfAttention(512)
         # 上采样模块 (ResNet blocks)
         self.res_block1 = ResidualBlock(512, 256)  # 14x14 -> 28x28
         self.res_block2 = ResidualBlock(256, 128)  # 28x28 -> 56x56
 
-        self.attention = SelfAttention(128)
+
 
         self.res_block3 = ResidualBlock(128, 64)   # 56x56 -> 112x112
 
@@ -335,20 +335,21 @@ class ResNetDecoderWithDeepSupervision(nn.Module):
         )
 
     def forward(self, x):
-        # 1. 初始上采样
-        # x = self.upsample_in(x)
-        # x = x.view(-1, 512, self.start_size, self.start_size)
-        x = self.initial_conv(x)
+        # 1. 初始上采样 (输入 x 是 48x48 的 z_s_map)
+        x = self.initial_conv(x)  # -> [B, 512, 48, 48]
+
+        # 【关键】在这里做 Attention，显存开销极小
+        x = self.attention(x)  # -> [B, 512, 48, 48]
 
         # 2. 通过残差块
-        x = self.res_block1(x)
-        x_56 = self.res_block2(x) # <-- 在这里截取中间特征 (56x56)
-        x_56_attn = self.attention(x_56)
-        # 3. 计算辅助输出
-        out_aux = self.aux_head(x_56_attn)
+        x = self.res_block1(x)  # -> [B, 256, 96, 96]
+        x_56 = self.res_block2(x)  # -> [B, 128, 192, 192] (这里就是你的 x_56)
 
-        # 继续主路径
-        x_final = self.res_block3(x_56_attn)
+        # 3. 计算辅助输出 (旁路，不影响主路)
+        out_aux = self.aux_head(x_56)
+
+        # 4. 继续主路径
+        x_final = self.res_block3(x_56)  # -> [B, 64, 384, 384]
         out_final = self.final_upsample(x_final)
 
         # 5. 返回主输出和辅助输出

@@ -119,17 +119,15 @@ def evaluate(model, val_loader, criterion, device, stage, data_type):
     logging.info("-- Downstream Task Metrics --")
 
     # 1. 基础任务 (Seg/Depth 总是打印)
-    task_str = f"  - Seg:   mIoU={final_miou:.4f}, Pixel Acc={final_pixel_acc:.4f}\n"
+    logging.info(f"[Seg   ] mIoU:     {final_miou:<7.4f} | Pixel Acc: {final_pixel_acc:<7.4f}")
     if 'gta5' not in str(data_type).lower():
-        task_str += f"  - Depth: Abs Err={final_abs_err:.4f}, Rel Err={final_rel_err:.4f}"
+        logging.info(f"[Depth ] Abs Err:  {final_abs_err:<7.4f} | Rel Err:   {final_rel_err:<7.4f}")
 
     # 2. 法线 (Normal) - 根据 data_type 决定是否打印
     if 'nyuv2' in str(data_type).lower():
-        task_str += (f"\n  - Normal: Mean={mean_angle:.2f}°, Med={median_angle:.2f}° | "
-                     f"Acc: 11°={acc_11:.3f}, 22°={acc_22:.3f}, 30°={acc_30:.3f}")
-
-    logging.info(task_str)
-    logging.info("--------------------------")
+        logging.info(f"[Normal] Mean Ang: {mean_angle:<7.2f}° | Median:    {median_angle:<7.2f}°")
+        logging.info(f"         Acc 11°:  {acc_11:<7.3f} | Acc 22°:   {acc_22:<7.3f} | Acc 30°: {acc_30:<7.3f}")
+    logging.info("-"*60)
 
     # Reset metrics
     miou_metric.reset()

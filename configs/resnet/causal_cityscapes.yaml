@@ -5,7 +5,7 @@
 data:
   type: "cityscapes"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/cityscape_preprocess"
-  batch_size: 16
+  batch_size: 64
   num_workers: 4
   img_size: [128, 256]
   pin_memory: true

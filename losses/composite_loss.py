@@ -221,7 +221,8 @@ class AdaptiveCompositeLoss(nn.Module):
         # ==== 基础项 ====
         self.seg_loss = nn.CrossEntropyLoss(ignore_index=-1)
         if dataset == "nyuv2":
-            self.depth_loss = ScaleInvariantLoss(lambda_var=0.5)
+            self.depth_loss = nn.L1Loss()
+            #self.depth_loss = ScaleInvariantLoss(lambda_var=0.5)
         elif dataset == "cityscapes" or "gta5_to_cityscapes":
             self.depth_loss = nn.L1Loss()
         self.scene_loss = nn.CrossEntropyLoss()
@@ -230,7 +231,7 @@ class AdaptiveCompositeLoss(nn.Module):
         self.independence_loss = LinearCKA(eps=1e-6)
 
         self.recon_geom_loss     = nn.L1Loss()
-        self.recon_app_loss_lpips= LPIPSMetric(net='squeeze')
+        self.recon_app_loss_lpips= LPIPSMetric(net='vgg')
         self.recon_app_loss_l1   = nn.L1Loss()
 
         self.edge_consistency_loss = EdgeConsistencyLoss()

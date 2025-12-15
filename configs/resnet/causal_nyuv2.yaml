@@ -1,7 +1,7 @@
 data:
   type: "nyuv2"
   dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
-  batch_size: 4   # 如果显存允许，尽量开大
+  batch_size: 32   # 如果显存允许，尽量开大
   num_workers: 4
   img_size: [288, 384] # 保持这个分辨率，或者尝试 [384, 384] 如果显存够
 
@@ -26,7 +26,7 @@ training:
   seed: 2024           # 固定种子
   epochs: 100          # 冲击 SOTA 建议 200
   optimizer: "AdamW"   # AdamW 比 Adam 泛化性更好
-  learning_rate: 0.0001
+  learning_rate: 0.0002
   weight_decay: 0.0001   # 增加一点 decay 防止过拟合
   
   # === 时间表控制 ===
@@ -56,7 +56,7 @@ losses:
   lambda_l1_recon: 1.0
 
   # === 分解正则 (利用你代码里的 Albedo/Shading) ===
-  lambda_img: 5.0        # I_hat = A*S，这个权重要高，保证 z_p 学到真正的 Albedo
+  lambda_img: 2.0        # I_hat = A*S，这个权重要高，保证 z_p 学到真正的 Albedo
   lambda_alb_tv: 0.01    # 平滑 Albedo
   lambda_sh_gray: 0.1    # 白光假设
   lambda_xcov: 0.05      # 抑制 Albedo 和 Normal 的相关性 (另一种解耦)

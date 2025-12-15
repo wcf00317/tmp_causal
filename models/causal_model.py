@@ -11,6 +11,7 @@ from .layers.shading import shading_from_normals
 from torch.utils.checkpoint import checkpoint
 
 
+
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation):
         modules = [
@@ -134,25 +135,24 @@ class GatedSegDepthDecoder(nn.Module):
 
         # [1] ASPP 放在最前面，负责降维和提取上下文
         # 无论输入 main_in_channels 是多少 (1024/3072)，ASPP 都把它压到 256
-        hidden_dim = 256
-        #self.aspp = ASPP(in_channels=main_in_channels, out_channels=aspp_out, atrous_rates=[12, 24, 36])
+        aspp_out = 256
+        self.aspp = ASPP(in_channels=main_in_channels, out_channels=aspp_out, atrous_rates=[12, 24, 36])
 
         # [2] 核心融合层 (Gated FiLM)
-        # 我们只需要做一次高质量的融合，不需要做4次
-        self.film_fusion = GatedFiLM(main_in_channels, z_p_channels, scale_cap)
+        self.film_fusion = GatedFiLM(aspp_out, z_p_channels, scale_cap)
 
         # [3] 最终预测头 (轻量化)
         # 包含 3x3 卷积整理特征 -> GN -> ReLU -> 1x1 输出
         self.head = nn.Sequential(
-            nn.Conv2d(main_in_channels, hidden_dim, 3, padding=1, bias=False),
-            nn.GroupNorm(32, hidden_dim),  # [关键] 使用 GroupNorm 防止 BS=2 崩溃
+            nn.Conv2d(aspp_out, 256, 3, padding=1, bias=False),
+            nn.GroupNorm(32, 256),  # [关键] 使用 GroupNorm 防止 BS=2 崩溃
             nn.ReLU(inplace=True),
             nn.Conv2d(256, out_channels, 1)
         )
 
     def forward(self, main_feat, z_p_feat, use_film: bool = True, detach_zp: bool = False):
         # 1. 提取特征 (H/8)
-        x = main_feat
+        x = self.aspp(main_feat)
 
         # 2. 因果干预 (融合 z_p)
         if use_film:
@@ -271,33 +271,26 @@ class CausalMTLModel(nn.Module):
         )
 
         # 任务分支
-        #decoder_main_dim = PROJ_CHANNELS * 2
+        decoder_main_dim = PROJ_CHANNELS * 2
         num_seg_classes = model_config.get('num_seg_classes', 40)
         self.zp_seg_refiner = ZpSegRefiner(c_in=PROJ_CHANNELS, out_classes=num_seg_classes, alpha=0.2)
 
-        aspp_in_channels = PROJ_CHANNELS * 2
-        self.shared_aspp = ASPP(
-            in_channels=aspp_in_channels,
-            out_channels=SHARED_DECODER_DIM,  # 输出维度由变量控制
-            atrous_rates=[12, 24, 36]
-        )
-
         # [修改] 实例化解码器时，将 SHARED_DECODER_DIM 传进去
         self.predictor_seg = GatedSegDepthDecoder(
-            main_in_channels=SHARED_DECODER_DIM,  # <--- 动态传递
+            main_in_channels=decoder_main_dim,  # <--- 动态传递
             z_p_channels=PROJ_CHANNELS,
             out_channels=num_seg_classes,
             scale_cap=1.0
         )
         self.predictor_depth = GatedSegDepthDecoder(
-            main_in_channels=SHARED_DECODER_DIM,  # <--- 动态传递
+            main_in_channels=decoder_main_dim,  # <--- 动态传递
             z_p_channels=PROJ_CHANNELS,
             out_channels=1,
             scale_cap=1.0,
-            use_sigmoid=True
+            use_sigmoid=False
         )
         self.predictor_normal = GatedSegDepthDecoder(
-            main_in_channels=SHARED_DECODER_DIM,  # <--- 动态传递
+            main_in_channels=decoder_main_dim,  # <--- 动态传递
             z_p_channels=PROJ_CHANNELS,
             out_channels=3,
             scale_cap=1.0
@@ -361,7 +354,7 @@ class CausalMTLModel(nn.Module):
             override_zp_seg_map: torch.Tensor | None = None,
             override_zp_depth_map: torch.Tensor | None = None,
     ):
-        # [MODIFIED] 使用统一接口提取特征 (兼容 ViT 和 ResNet)
+        # [MODIFIED] 使用统一接口提取特征
         combined_feat, h, features = self.extract_features(x)
 
         # 1. 潜变量投影 (Latent Projections)
@@ -379,14 +372,12 @@ class CausalMTLModel(nn.Module):
         z_p_depth = z_p_depth_map.mean(dim=[2, 3])
         z_p_normal = z_p_normal_map.mean(dim=[2, 3])
 
-
-        # 2. 统一投影给任务解码器 (Unified Decoder Projections)
+        # 2. 统一投影给任务解码器
         f_proj = self.proj_f(combined_feat)
         zs_proj = self.proj_z_s(z_s_map)
 
         zp_seg_proj = self.proj_z_p_seg(z_p_seg_map)
         zp_depth_proj = self.proj_z_p_depth(z_p_depth_map)
-        # [NEW] Normal Projection
         zp_normal_proj = self.proj_z_p_normal(z_p_normal_map)
 
         # 阶段控制开关
@@ -395,10 +386,22 @@ class CausalMTLModel(nn.Module):
 
         # ---------- 3. 下游任务解码 (Tasks) ----------
 
+        # [REVERTED] 恢复原始逻辑：拼接 f(256) + zs(256) = 512
+        # 这个 512 维的特征会进入每个解码器内部的 ASPP
+        task_input_feat = torch.cat([f_proj, zs_proj], dim=1)
+
+        # 辅助函数：用于 checkpoint 的包装
+        def run_decoder(decoder_module, main, zp, film, detach):
+            return decoder_module(main, zp, film, detach)
+
         # === Task 1: Segmentation ===
-        raw_main_feat = torch.cat([f_proj, zs_proj], dim=1)
-        shared_feat = self.shared_aspp(raw_main_feat)
-        pred_seg_main = self.predictor_seg(shared_feat, zp_seg_proj, use_film=use_film, detach_zp=False)
+        # [OPTIMIZATION] 使用 Checkpoint 节省显存 (仅在训练时)
+        if self.training and task_input_feat.requires_grad:
+            # 注意：这里传入的是 512 维的 task_input_feat
+            pred_seg_main = checkpoint(run_decoder, self.predictor_seg, task_input_feat, zp_seg_proj, use_film, False,
+                                       use_reentrant=False)
+        else:
+            pred_seg_main = self.predictor_seg(task_input_feat, zp_seg_proj, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:
             seg_res = self.zp_seg_refiner(zp_seg_proj, out_size=pred_seg_main.shape[-2:])
@@ -407,7 +410,11 @@ class CausalMTLModel(nn.Module):
             pred_seg = pred_seg_main
 
         # === Task 2: Depth ===
-        pred_depth_main = self.predictor_depth(shared_feat, zp_depth_proj, use_film=use_film, detach_zp=False)
+        if self.training and task_input_feat.requires_grad:
+            pred_depth_main = checkpoint(run_decoder, self.predictor_depth, task_input_feat, zp_depth_proj, use_film,
+                                         False, use_reentrant=False)
+        else:
+            pred_depth_main = self.predictor_depth(task_input_feat, zp_depth_proj, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:
             zp_residual = self.zp_depth_refiner(zp_depth_proj)
@@ -418,65 +425,78 @@ class CausalMTLModel(nn.Module):
             pred_depth = pred_depth_main
 
         # === Task 3: Normal [NEW] ===
-        pred_normal_main = self.predictor_normal(shared_feat, zp_normal_proj, use_film=use_film, detach_zp=False)
+        if self.training and task_input_feat.requires_grad:
+            pred_normal_main = checkpoint(run_decoder, self.predictor_normal, task_input_feat, zp_normal_proj, use_film,
+                                          False, use_reentrant=False)
+        else:
+            pred_normal_main = self.predictor_normal(task_input_feat, zp_normal_proj, use_film=use_film,
+                                                     detach_zp=False)
 
         if use_zp_residual:
-            # Normal 的 Refiner 需要输出 3 通道，且通常权重(alpha)较小
-            # 我们在 __init__ 里定义的 zp_normal_refiner 已经包含了这些逻辑
-            normal_res = self.zp_normal_refiner(zp_normal_proj) * 0.1
-            normal_res = F.interpolate(normal_res, size=pred_normal_main.shape[-2:], mode='bilinear',
-                                       align_corners=False)
-            pred_normal = pred_normal_main + normal_res
+            # 兼容性处理：如果您的代码里没有 zp_normal_refiner，请注释掉这几行
+            if hasattr(self, 'zp_normal_refiner'):
+                normal_res = self.zp_normal_refiner(zp_normal_proj) * 0.1
+                normal_res = F.interpolate(normal_res, size=pred_normal_main.shape[-2:], mode='bilinear',
+                                           align_corners=False)
+                pred_normal = pred_normal_main + normal_res
+            else:
+                pred_normal = pred_normal_main
         else:
             pred_normal = pred_normal_main
 
-        # 法线归一化 (关键步骤)
+        # 法线归一化
         pred_normal = F.normalize(pred_normal, p=2, dim=1)
 
+        # [REMOVED] Scene Classification 移除，恢复为您原始代码逻辑
 
         # ---------- 4. 辅助与重构 (Aux / Recon) ----------
 
         # 辅助深度解码 (仅 z_p)
         pred_depth_from_zp = self.decoder_zp_depth(z_p_depth_map) if use_zp_residual else torch.zeros_like(pred_depth)
 
-        # 原有重构 (像素级)
-        recon_geom_final, recon_geom_aux = self.decoder_geom(z_s_map)
-        recon_app_final_logits, recon_app_aux_logits = self.decoder_app(z_p_seg_map)
+        # 原有重构 (像素级) - 同样应用 Checkpoint 以解决显存瓶颈
+        # 注意：这里保留了重构分支，因为这是 Causal 解耦的核心
+        if self.training and z_s_map.requires_grad:
+            recon_geom_final, recon_geom_aux = checkpoint(self.decoder_geom, z_s_map, use_reentrant=False)
+            recon_app_final_logits, recon_app_aux_logits = checkpoint(self.decoder_app, z_p_seg_map,
+                                                                      use_reentrant=False)
+        else:
+            recon_geom_final, recon_geom_aux = self.decoder_geom(z_s_map)
+            recon_app_final_logits, recon_app_aux_logits = self.decoder_app(z_p_seg_map)
+
         recon_app_final = self.final_app_activation(recon_app_final_logits)
         recon_app_aux = self.final_app_activation(recon_app_aux_logits)
 
         # ---------- 5. 分解式重构 (Decomposition) ----------
-        A = self.albedo_head(z_p_seg_map)  # 由外观路 z_p
-        N = self.normal_head(z_s_map)  # 由结构路 z_s (这是结构法线，用于重构)
-        L = self.light_head(h)  # 全局光照
-        S = shading_from_normals(N, L)  # 明暗
+        # 如果您的代码里有这部分就保留，没有就删除
+        A = self.albedo_head(z_p_seg_map)
+        N = self.normal_head(z_s_map)
+        L = self.light_head(h)
+        S = shading_from_normals(N, L)
 
-        # 上采样到输入大小 (如果 Feature Map 小于 Input)
+        # 上采样
         target_size = self._target_size
         if A.shape[-2:] != target_size:
             A = F.interpolate(A, size=target_size, mode='bilinear', align_corners=False)
             N = F.interpolate(N, size=target_size, mode='bilinear', align_corners=False)
             S = F.interpolate(S, size=target_size, mode='bilinear', align_corners=False)
 
-        I_hat = torch.clamp(A * S, 0.0, 1.0)  # 重构图像
+        I_hat = torch.clamp(A * S, 0.0, 1.0)
 
         outputs = {
             # 潜变量
             'z_s': z_s, 'z_p_seg': z_p_seg, 'z_p_depth': z_p_depth,
-            'z_p_normal': z_p_normal,  # [NEW]
+            'z_p_normal': z_p_normal,
             'z_s_map': z_s_map, 'z_p_seg_map': z_p_seg_map, 'z_p_depth_map': z_p_depth_map,
 
             # 任务输出
             'pred_seg': pred_seg,
             'pred_depth': pred_depth,
-            'pred_normal': pred_normal,  # [NEW] 显式命名
-
-            # [CRITICAL] 评估器 Evaluator 会寻找 'normals' 键
-            # 这里我们把‘预测法线’(pred_normal) 赋给它，用于计算 Task Metric
-            'normals': pred_normal,
+            'pred_normal': pred_normal,
+            'normals': pred_normal,  # 评估器需要的键名
 
             # 分解中间量
-            'decomposition_normal': N,  # z_s 产生的结构法线
+            'decomposition_normal': N,
             'albedo': A, 'shading': S, 'sh_coeff': L, 'recon_decomp': I_hat,
 
             # 辅助输出
