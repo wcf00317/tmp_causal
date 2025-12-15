@@ -134,25 +134,25 @@ class GatedSegDepthDecoder(nn.Module):
 
         # [1] ASPP 放在最前面，负责降维和提取上下文
         # 无论输入 main_in_channels 是多少 (1024/3072)，ASPP 都把它压到 256
-        aspp_out = 256
-        self.aspp = ASPP(in_channels=main_in_channels, out_channels=aspp_out, atrous_rates=[12, 24, 36])
+        hidden_dim = 256
+        #self.aspp = ASPP(in_channels=main_in_channels, out_channels=aspp_out, atrous_rates=[12, 24, 36])
 
         # [2] 核心融合层 (Gated FiLM)
         # 我们只需要做一次高质量的融合，不需要做4次
-        self.film_fusion = GatedFiLM(aspp_out, z_p_channels, scale_cap)
+        self.film_fusion = GatedFiLM(main_in_channels, z_p_channels, scale_cap)
 
         # [3] 最终预测头 (轻量化)
         # 包含 3x3 卷积整理特征 -> GN -> ReLU -> 1x1 输出
         self.head = nn.Sequential(
-            nn.Conv2d(aspp_out, 256, 3, padding=1, bias=False),
-            nn.GroupNorm(32, 256),  # [关键] 使用 GroupNorm 防止 BS=2 崩溃
+            nn.Conv2d(main_in_channels, hidden_dim, 3, padding=1, bias=False),
+            nn.GroupNorm(32, hidden_dim),  # [关键] 使用 GroupNorm 防止 BS=2 崩溃
             nn.ReLU(inplace=True),
             nn.Conv2d(256, out_channels, 1)
         )
 
     def forward(self, main_feat, z_p_feat, use_film: bool = True, detach_zp: bool = False):
         # 1. 提取特征 (H/8)
-        x = self.aspp(main_feat)
+        x = main_feat
 
         # 2. 因果干预 (融合 z_p)
         if use_film:
@@ -254,6 +254,8 @@ class CausalMTLModel(nn.Module):
 
         # 统一投影到 PROJ_CHANNELS 供任务解码
         PROJ_CHANNELS = 256
+        SHARED_DECODER_DIM = 256
+        aspp_in_channels = PROJ_CHANNELS * 2
         self.proj_f = nn.Conv2d(combined_feature_dim, PROJ_CHANNELS, kernel_size=1)
 
         self.proj_z_s = nn.Conv2d(self.latent_dim_s, PROJ_CHANNELS, kernel_size=1)
@@ -269,19 +271,37 @@ class CausalMTLModel(nn.Module):
         )
 
         # 任务分支
-        decoder_main_dim = PROJ_CHANNELS * 2
+        #decoder_main_dim = PROJ_CHANNELS * 2
         num_seg_classes = model_config.get('num_seg_classes', 40)
         self.zp_seg_refiner = ZpSegRefiner(c_in=PROJ_CHANNELS, out_classes=num_seg_classes, alpha=0.2)
 
+        aspp_in_channels = PROJ_CHANNELS * 2
+        self.shared_aspp = ASPP(
+            in_channels=aspp_in_channels,
+            out_channels=SHARED_DECODER_DIM,  # 输出维度由变量控制
+            atrous_rates=[12, 24, 36]
+        )
+
+        # [修改] 实例化解码器时，将 SHARED_DECODER_DIM 传进去
         self.predictor_seg = GatedSegDepthDecoder(
-            main_in_channels=decoder_main_dim, z_p_channels=PROJ_CHANNELS,
-            out_channels=num_seg_classes, scale_cap=1.0
+            main_in_channels=SHARED_DECODER_DIM,  # <--- 动态传递
+            z_p_channels=PROJ_CHANNELS,
+            out_channels=num_seg_classes,
+            scale_cap=1.0
         )
         self.predictor_depth = GatedSegDepthDecoder(
-            main_in_channels=decoder_main_dim, z_p_channels=PROJ_CHANNELS,
-            out_channels=1, scale_cap=1.0, use_sigmoid=True
+            main_in_channels=SHARED_DECODER_DIM,  # <--- 动态传递
+            z_p_channels=PROJ_CHANNELS,
+            out_channels=1,
+            scale_cap=1.0,
+            use_sigmoid=True
         )
-        self.predictor_normal = GatedSegDepthDecoder(decoder_main_dim, PROJ_CHANNELS, 3, scale_cap=1.0)
+        self.predictor_normal = GatedSegDepthDecoder(
+            main_in_channels=SHARED_DECODER_DIM,  # <--- 动态传递
+            z_p_channels=PROJ_CHANNELS,
+            out_channels=3,
+            scale_cap=1.0
+        )
 
         self.decoder_zp_depth = SegDepthDecoder(self.latent_dim_p, 1)
         self.decoder_zp_normal = SegDepthDecoder(self.latent_dim_p, 3)
@@ -376,8 +396,9 @@ class CausalMTLModel(nn.Module):
         # ---------- 3. 下游任务解码 (Tasks) ----------
 
         # === Task 1: Segmentation ===
-        seg_main = torch.cat([f_proj, zs_proj], dim=1)
-        pred_seg_main = self.predictor_seg(seg_main, zp_seg_proj, use_film=use_film, detach_zp=False)
+        raw_main_feat = torch.cat([f_proj, zs_proj], dim=1)
+        shared_feat = self.shared_aspp(raw_main_feat)
+        pred_seg_main = self.predictor_seg(shared_feat, zp_seg_proj, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:
             seg_res = self.zp_seg_refiner(zp_seg_proj, out_size=pred_seg_main.shape[-2:])
@@ -386,8 +407,7 @@ class CausalMTLModel(nn.Module):
             pred_seg = pred_seg_main
 
         # === Task 2: Depth ===
-        depth_main = torch.cat([f_proj, zs_proj], dim=1)
-        pred_depth_main = self.predictor_depth(depth_main, zp_depth_proj, use_film=use_film, detach_zp=False)
+        pred_depth_main = self.predictor_depth(shared_feat, zp_depth_proj, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:
             zp_residual = self.zp_depth_refiner(zp_depth_proj)
@@ -398,8 +418,7 @@ class CausalMTLModel(nn.Module):
             pred_depth = pred_depth_main
 
         # === Task 3: Normal [NEW] ===
-        normal_main = torch.cat([f_proj, zs_proj], dim=1)
-        pred_normal_main = self.predictor_normal(normal_main, zp_normal_proj, use_film=use_film, detach_zp=False)
+        pred_normal_main = self.predictor_normal(shared_feat, zp_normal_proj, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:
             # Normal 的 Refiner 需要输出 3 通道，且通常权重(alpha)较小

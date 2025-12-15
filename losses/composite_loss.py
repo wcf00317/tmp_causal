@@ -230,7 +230,7 @@ class AdaptiveCompositeLoss(nn.Module):
         self.independence_loss = LinearCKA(eps=1e-6)
 
         self.recon_geom_loss     = nn.L1Loss()
-        self.recon_app_loss_lpips= LPIPSMetric(net='vgg')
+        self.recon_app_loss_lpips= LPIPSMetric(net='squeeze')
         self.recon_app_loss_l1   = nn.L1Loss()
 
         self.edge_consistency_loss = EdgeConsistencyLoss()
