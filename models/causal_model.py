@@ -188,16 +188,16 @@ class SegDepthDecoder(nn.Module):
         self.upsample1 = _make_upsample_layer(input_channels, 256)  # 14x14 -> 28x28
         self.upsample2 = _make_upsample_layer(256, 128)  # 28x28 -> 56x56
         self.upsample3 = _make_upsample_layer(128, 64)  # 56x56 -> 112x112
-        self.upsample4 = _make_upsample_layer(64, 32)  # 112x112 -> 224x224
+        #self.upsample4 = _make_upsample_layer(64, 32)  # 112x112 -> 224x224
 
         # 最终的预测层
-        self.final_conv = nn.Conv2d(32, output_channels, kernel_size=3, padding=1)
+        self.final_conv = nn.Conv2d(64, output_channels, kernel_size=3, padding=1)
 
     def forward(self, x):
         x = self.upsample1(x)
         x = self.upsample2(x)
         x = self.upsample3(x)
-        x = self.upsample4(x)
+        #x = self.upsample4(x)
         return self.final_conv(x)
 
 
@@ -300,7 +300,6 @@ class CausalMTLModel(nn.Module):
         self.decoder_zp_normal = SegDepthDecoder(self.latent_dim_p, 3)
 
         # 原有的可视化重构（保留为 AUX）
-        from .building_blocks import ConvDecoder as VisualizationDecoder
         self.decoder_geom = ResNetDecoderWithDeepSupervision(self.latent_dim_s, 1, tuple(data_config['img_size']))
         self.decoder_app = ResNetDecoderWithDeepSupervision(self.latent_dim_p, 3, tuple(data_config['img_size']))
         self.final_app_activation = nn.Sigmoid()

@@ -135,7 +135,7 @@ def main():
     print(f"📚 GTA5 Val Dataset: {len(val_dataset)} images")
 
     # 6. 获取类别数 (从 config 读取，通常是 7 或 19)
-    num_classes = config['model'].get('num_seg_classes', 19)  # 默认为19，防止报错
+    num_classes = config['model'].get('num_seg_classes', 7)  # 默认为19，防止报错
     if 'gta5_to_cityscapes' in config['data']['type']:
         # 如果是 G2C 任务且 config 里明确写了 7
         print(f"ℹ️ Task is GTA5 -> Cityscapes. Evaluating on {num_classes} classes.")

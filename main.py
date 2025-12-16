@@ -192,7 +192,7 @@ def main(config_path):
     if os.path.exists(best_ckpt):
         checkpoint = torch.load(best_ckpt, map_location=device)
         model.load_state_dict(checkpoint['state_dict'], strict=False)
-        generate_visual_reports(model, val_loader, device, save_dir=vis_dir, num_reports=5)
+        generate_visual_reports(model, val_loader, device, save_dir=vis_dir, num_reports=3)
 
     if hasattr(train_dataset, "close"): train_dataset.close()
     if hasattr(val_dataset, "close"): val_dataset.close()

@@ -14,8 +14,8 @@ model:
   type: "causal"
   encoder_name: "resnet50"
   pretrained: true
-  latent_dim_s: 128
-  latent_dim_p: 256
+  latent_dim_s: 1024
+  latent_dim_p: 2048
   num_seg_classes: 7
   num_scene_classes: 1
   decomposition:
@@ -25,7 +25,7 @@ model:
 
 training:
   seed: 2025
-  epochs: 200
+  epochs: 100
   optimizer: "AdamW"
   learning_rate: 0.0001
   weight_decay: 0.01
@@ -33,7 +33,7 @@ training:
   # === 关键的时间表设置 (保持原 log 一致) ===
   stage0_epochs: 5     # 分解预热
   stage1_epochs: 40    # 结构预热 (前40个epoch)
-  ind_warmup_epochs: 40
+  ind_warmup_epochs: 30
 
   lr_scheduler:
     type: "cosine"
@@ -43,12 +43,12 @@ training:
 losses:
   # === 任务权重 ===
   lambda_seg: 10.0
-  lambda_depth: 50.0   # 保持原 log 中的高压配置
+  lambda_depth: 30.0   # 保持原 log 中的高压配置
   lambda_normal: 0.0
   lambda_scene: 0.0
 
   # === 解耦 ===
-  lambda_independence: 1.0
+  lambda_independence: 10.0
 
   # === 重构 ===
   alpha_recon_geom: 2.0

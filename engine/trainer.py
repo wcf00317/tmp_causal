@@ -169,55 +169,66 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
     total_train_loss = 0.0
     pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Training]", leave=False)
 
-    # [FIX 1] 自动计算累积步数 (物理 BS -> 目标 BS 16)
-    # 如果物理 BS=2，则累积 8 步
+    # 自动计算累积步数 (保持原有逻辑)
     target_bs = 16
     physical_bs = train_loader.batch_size
     accumulation_steps = max(1, target_bs // physical_bs)
 
     optimizer.zero_grad(set_to_none=True)
 
-    # [FIX 2] Scaler 必须在循环外初始化！
-    scaler = GradScaler()
+    # [修改 1] 删除 scaler 初始化
+    # scaler = GradScaler()  <-- 删除
 
     for i, batch in enumerate(pbar):
         batch = {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
         rgb = batch['rgb']
 
-        # 开启混合精度
-        with autocast():
-            outputs = model(rgb, stage=stage)
+        # [修改 2] 删除 with autocast():，直接运行模型
+        # with autocast():  <-- 删除这一行，下面的代码取消一级缩进
+        outputs = model(rgb, stage=stage)
 
-            crit_out = criterion(outputs, batch)
-            if isinstance(crit_out, (tuple, list)):
-                total_loss, loss_dict = crit_out[0], crit_out[1]
-            elif isinstance(crit_out, dict):
-                loss_dict = crit_out
-                total_loss = loss_dict.get('total_loss')
-                if total_loss is None:
-                    raise ValueError("criterion returned dict but no 'total_loss' key found.")
-            else:
-                raise ValueError("criterion must return dict or (total_loss, dict).")
+        crit_out = criterion(outputs, batch)
+        if isinstance(crit_out, (tuple, list)):
+            total_loss, loss_dict = crit_out[0], crit_out[1]
+        elif isinstance(crit_out, dict):
+            loss_dict = crit_out
+            total_loss = loss_dict.get('total_loss')
+            if total_loss is None:
+                raise ValueError("criterion returned dict but no 'total_loss' key found.")
+        else:
+            raise ValueError("criterion must return dict or (total_loss, dict).")
 
-            loss_normalized = total_loss / accumulation_steps
+        loss_normalized = total_loss / accumulation_steps
 
-        # [FIX 3] 必须使用 scaler.scale() 进行反向传播
-        # 原代码错写成了 loss_normalized.backward()
-        scaler.scale(loss_normalized).backward()
+        # [修改 3] 删除 scaler.scale，直接反向传播
+        # scaler.scale(loss_normalized).backward() <-- 删除
+        loss_normalized.backward()  # <-- 改为这样
 
         # 梯度更新
         if (i + 1) % accumulation_steps == 0:
-            scaler.step(optimizer)
-            scaler.update()
+            # [强烈推荐] 即使是 FP32，保留梯度裁剪也是防止训练崩溃的最佳实践
+            # 之前提到的 unscale_ 也不需要了，直接 clip 即可
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+
+            # [修改 4] 删除 scaler.step 和 scaler.update，改回标准 step
+            # scaler.step(optimizer)  <-- 删除
+            # scaler.update()         <-- 删除
+            optimizer.step()  # <-- 改为这样
+
             optimizer.zero_grad(set_to_none=True)
 
-        total_train_loss += float(total_loss.item())
-        pbar.set_postfix(loss=f"{total_loss.item():.4f}")
+        # 记录 Loss (加个防止 NaN 的判断，虽在 FP32 下很难出现)
+        loss_val = total_loss.item()
+        if not np.isfinite(loss_val):
+            print(f"Warning: Non-finite loss {loss_val} at step {i}")
+
+        total_train_loss += float(loss_val)
+        pbar.set_postfix(loss=f"{loss_val:.4f}")
 
     # 处理剩余梯度 (如果有)
     if len(train_loader) % accumulation_steps != 0:
-        scaler.step(optimizer)
-        scaler.update()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+        optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
     avg_train_loss = total_train_loss / max(1, len(train_loader))
@@ -297,7 +308,23 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
             stage = 2
         if epoch == 0 or epoch == stage0_epochs or epoch == stage1_epochs:
             _switch_stage_freeze(model, stage)
+        target_ind_lambda = float(config['losses'].get('lambda_independence', 0.0))
+        ind_warmup_epochs = int(train_cfg.get('ind_warmup_epochs', 0))
 
+        current_ind_lambda = target_ind_lambda
+        if stage < 2:
+            # Stage 0/1 强制为 0 (虽然 Loss 内部也有判断，但这里显式控制更安全)
+            current_ind_lambda = 0.0
+        elif ind_warmup_epochs > 0:
+            # Stage 2：开始 Warmup
+            # 关键点：进度 = (当前Epoch - Stage2开始Epoch)
+            progress = epoch - stage1_epochs
+
+            # 限制比例在 0.0 到 1.0 之间
+            ratio = min(1.0, max(0.0, progress / float(ind_warmup_epochs)))
+            current_ind_lambda = target_ind_lambda * ratio
+        if hasattr(criterion, 'weights'):
+            criterion.weights['lambda_independence'] = torch.tensor(current_ind_lambda, device=device)
         # ---- Warm-up (Cosine only) ----
         if sched["type"] == "cosine":
             warmup_epochs = sched["warmup_epochs"]
