@@ -10,7 +10,7 @@ model:
   encoder_name: "resnet50"
   pretrained: True
   latent_dim_s: 1024
-  latent_dim_p: 2048
+  latent_dim_p: 64
   z_s_bottleneck_noise: 0.1 # 稍微加点噪声防止过拟合
   
   # 关键：开启分解头，利用你的 decomposition loss 辅助 z_p 学习
@@ -30,9 +30,9 @@ training:
   weight_decay: 0.0001   # 增加一点 decay 防止过拟合
   
   # === 时间表控制 ===
-  stage0_epochs: 5     # 仅训练分解 (A*S=I)
-  stage1_epochs: 35    # 强力预热 z_s (20% 时间)
-  ind_warmup_epochs: 35 # CKA 慢慢介入
+  stage0_epochs: 1     # 仅训练分解 (A*S=I)
+  stage1_epochs: 1    # 强力预热 z_s (20% 时间)
+  ind_warmup_epochs: 2 # CKA 慢慢介入
 
   lr_scheduler:
     type: "cosine"

@@ -6,8 +6,8 @@ class LinearCKA(nn.Module):
         self.eps = eps
     def forward(self, X, Y):
         # X,Y: [B, D]
-        X = (X - X.mean(0)) / (X.std(0) + self.eps)
-        Y = (Y - Y.mean(0)) / (Y.std(0) + self.eps)
+        X = (X - X.mean(0)) #/ (X.std(0) + self.eps)
+        Y = (Y - Y.mean(0)) #/ (Y.std(0) + self.eps)
         K = X @ X.t()
         L = Y @ Y.t()
         # 中心化

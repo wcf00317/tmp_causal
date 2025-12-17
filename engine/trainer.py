@@ -308,7 +308,35 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
             stage = 2
         if epoch == 0 or epoch == stage0_epochs or epoch == stage1_epochs:
             _switch_stage_freeze(model, stage)
+
+        if epoch == 0:
+            print(f"🔍 [DEBUG CONFIG] Epoch {epoch}")
+            print(f"   - Stage0 End: {stage0_epochs}")
+            print(f"   - Stage1 End: {stage1_epochs} (Expected: < {epoch} for Stage 2)")
+            print(f"   - Current Stage: {stage}")
+
+        raw_target = config['losses'].get('lambda_independence', "NOT_FOUND")
         target_ind_lambda = float(config['losses'].get('lambda_independence', 0.0))
+
+        # 3. 打印 Warmup 配置
+        ind_warmup_epochs = int(train_cfg.get('ind_warmup_epochs', 0))
+
+        # 4. 计算逻辑 + 过程打印
+        current_ind_lambda = target_ind_lambda
+        if stage < 2:
+            print(f"   - [Status] In Stage {stage} (Frozen/Warmup), Forcing Lambda to 0.0")
+            current_ind_lambda = 0.0
+        elif ind_warmup_epochs > 0:
+            progress = epoch - stage1_epochs
+            ratio = min(1.0, max(0.0, progress / float(ind_warmup_epochs)))
+            current_ind_lambda = target_ind_lambda * ratio
+            print(f"   - [Status] In Stage 2. Progress: {progress}/{ind_warmup_epochs}, Ratio: {ratio:.4f}")
+            print(f"   - [Calc] {target_ind_lambda} * {ratio:.4f} = {current_ind_lambda}")
+        else:
+            print(f"   - [Status] In Stage 2 (No Warmup). Using Full Target.")
+            
+        print(f"🔍 DEBUG: Keys in config['losses']: {list(config['losses'].keys())}")
+        target_ind_lambda = float(config['losses'].get('lambda_independence'))
         ind_warmup_epochs = int(train_cfg.get('ind_warmup_epochs', 0))
 
         current_ind_lambda = target_ind_lambda
@@ -323,8 +351,16 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
             # 限制比例在 0.0 到 1.0 之间
             ratio = min(1.0, max(0.0, progress / float(ind_warmup_epochs)))
             current_ind_lambda = target_ind_lambda * ratio
-        if hasattr(criterion, 'weights'):
-            criterion.weights['lambda_independence'] = torch.tensor(current_ind_lambda, device=device)
+        real_criterion = criterion.module if hasattr(criterion, 'module') else criterion
+
+        # [FIX] 2. 强制更新并打印 Debug 信息
+        if hasattr(real_criterion, 'weights'):
+            # 打印一下，确保真的改到了设置的预期
+            print(f"DEBUG Epoch {epoch}: Updating lambda_independence to {current_ind_lambda:.1f}")
+            real_criterion.weights['lambda_independence'] = torch.tensor(current_ind_lambda, device=device)
+        else:
+            # 如果没找到 weights 属性，打印红色警告！
+            print(f"⚠️ WARNING: Could not find 'weights' in criterion at Epoch {epoch}! Lambda NOT updated!")
         # ---- Warm-up (Cosine only) ----
         if sched["type"] == "cosine":
             warmup_epochs = sched["warmup_epochs"]

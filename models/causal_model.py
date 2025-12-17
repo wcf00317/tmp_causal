@@ -222,7 +222,7 @@ class CausalMTLModel(nn.Module):
             )
             # ResNet 输出是 [256, 512, 1024, 2048]
             # 我们需要把它们全部投影到一个统一的维度 (e.g. 768) 以模拟 ViT
-            target_dim = 256
+            target_dim = 1024
             self.resnet_adapters = nn.ModuleList([
                 nn.Conv2d(in_c, target_dim, kernel_size=1)
                 for in_c in self.encoder.feature_dims
@@ -354,22 +354,93 @@ class CausalMTLModel(nn.Module):
             override_zp_depth_map: torch.Tensor | None = None,
     ):
         # [MODIFIED] 使用统一接口提取特征
+        # combined_feat, h, features = self.extract_features(x)
+        #
+        # # 1. 潜变量投影 (Latent Projections)
+        # z_s_map = self.projector_s(combined_feat) if override_zs_map is None else override_zs_map
+        # z_p_seg_map = self.projector_p_seg(combined_feat) if override_zp_seg_map is None else override_zp_seg_map
+        # z_p_depth_map = self.projector_p_depth(
+        #     combined_feat) if override_zp_depth_map is None else override_zp_depth_map
+        #
+        # # [NEW] Normal Latent
+        # z_p_normal_map = self.projector_p_normal(combined_feat)
+        #
+        # # Global Pooling
+        # z_s = z_s_map.mean(dim=[2, 3])
+        # z_p_seg = z_p_seg_map.mean(dim=[2, 3])
+        # z_p_depth = z_p_depth_map.mean(dim=[2, 3])
+        # z_p_normal = z_p_normal_map.mean(dim=[2, 3])
+
         combined_feat, h, features = self.extract_features(x)
 
+        # 获取特征图的原始空间尺寸 [H, W] (例如 32x64)
+        H_map, W_map = combined_feat.shape[2], combined_feat.shape[3]
+
+        # 设置网格大小 (2x2 或 4x4)
+        # grid_size = 2
+        grid_size = 4
+
         # 1. 潜变量投影 (Latent Projections)
-        z_s_map = self.projector_s(combined_feat) if override_zs_map is None else override_zs_map
-        z_p_seg_map = self.projector_p_seg(combined_feat) if override_zp_seg_map is None else override_zp_seg_map
-        z_p_depth_map = self.projector_p_depth(
-            combined_feat) if override_zp_depth_map is None else override_zp_depth_map
 
-        # [NEW] Normal Latent
-        z_p_normal_map = self.projector_p_normal(combined_feat)
+        # === A. 结构分支 z_s (保持不变，保留全分辨率空间结构) ===
+        if override_zs_map is None:
+            z_s_map = self.projector_s(combined_feat)
+        else:
+            z_s_map = override_zs_map
 
-        # Global Pooling
+        # === B. 风格分支 z_p (Adaptive GAP + Interpolate) ===
+
+        # 1. Adaptive Pooling: [B, C, H, W] -> [B, C, K, K]
+        #    这将强制把空间信息压缩成 KxK 的粗糙网格
+        feat_grid = F.adaptive_avg_pool2d(combined_feat, (grid_size, grid_size))
+
+        # 2. 投影到 latent_dim_p: [B, C, K, K] -> [B, dim_p, K, K]
+        #    Projector 是 1x1 卷积，它可以处理任意 spatial 尺寸
+        z_p_seg_grid = self.projector_p_seg(feat_grid)
+        z_p_depth_grid = self.projector_p_depth(feat_grid)
+
+        # 兼容性检查：如果有 normal projector
+        if hasattr(self, 'projector_p_normal'):
+            z_p_normal_grid = self.projector_p_normal(feat_grid)
+        else:
+            z_p_normal_grid = None
+
+        # 3. 上采样回 [B, dim, H, W] 以兼容解码器
+        #    使用 'nearest' 插值，严格保留 KxK 的块状结构，不进行平滑过渡，
+        #    防止模型通过插值梯度偷学到位置信息。
+        if override_zp_seg_map is None:
+            z_p_seg_map = F.interpolate(z_p_seg_grid, size=(H_map, W_map), mode='nearest')
+        else:
+            z_p_seg_map = override_zp_seg_map
+
+        if override_zp_depth_map is None:
+            z_p_depth_map = F.interpolate(z_p_depth_grid, size=(H_map, W_map), mode='nearest')
+        else:
+            z_p_depth_map = override_zp_depth_map
+
+        if z_p_normal_grid is not None:
+            z_p_normal_map = F.interpolate(z_p_normal_grid, size=(H_map, W_map), mode='nearest')
+        else:
+            z_p_normal_map = None
+
+        # =======================================================
+        # 2. Global Pooling Variables (用于 Loss 计算，如 CKA)
+        # =======================================================
+
+        # z_s 仍计算全局均值
         z_s = z_s_map.mean(dim=[2, 3])
-        z_p_seg = z_p_seg_map.mean(dim=[2, 3])
-        z_p_depth = z_p_depth_map.mean(dim=[2, 3])
-        z_p_normal = z_p_normal_map.mean(dim=[2, 3])
+
+        # z_p 现在是 [B, dim_p, K, K]。
+        # 为了计算 CKA (独立性损失)，我们需要一个向量。
+        # 这里有两个选择：
+        #   Option A: 再次求均值 -> [B, dim_p]。这代表"整张图的平均风格"。
+        #             (推荐，因为 CKA 通常衡量全局独立性，且 dim 较小计算快)
+        #   Option B: Flatten -> [B, dim_p * K * K]。这代表"网格风格的拼接"。
+
+        # 建议使用 Mean，保持与 z_s (也是 Mean 来的) 的维度一致性
+        z_p_seg = z_p_seg_grid.mean(dim=[2, 3])
+        z_p_depth = z_p_depth_grid.mean(dim=[2, 3])
+        z_p_normal = z_p_normal_grid.mean(dim=[2, 3]) if z_p_normal_grid is not None else None
 
         # 2. 统一投影给任务解码器
         f_proj = self.proj_f(combined_feat)
