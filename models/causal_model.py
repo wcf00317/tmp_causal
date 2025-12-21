@@ -130,36 +130,36 @@ class CrossAttentionFusion(nn.Module):
     def __init__(self, main_channels, style_channels, inter_channels=None):
         super().__init__()
         self.inter_channels = inter_channels if inter_channels else main_channels // 2
-        
+
         # 1x1 Conv 投影
         self.query_conv = nn.Conv2d(main_channels, self.inter_channels, kernel_size=1)
         self.key_conv = nn.Conv2d(style_channels, self.inter_channels, kernel_size=1)
         self.value_conv = nn.Conv2d(style_channels, main_channels, kernel_size=1)
-        
+
         # 初始为 0，防止破坏预训练特征
         self.gamma = nn.Parameter(torch.zeros(1))
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x_main, z_p):
         batch_size, C, H, W = x_main.size()
-        
+
         # Q: [B, C_inter, HW] -> [B, HW, C_inter]
         proj_query = self.query_conv(x_main).view(batch_size, self.inter_channels, -1).permute(0, 2, 1)
         # K: [B, C_inter, HW]
         proj_key = self.key_conv(z_p).view(batch_size, self.inter_channels, -1)
-        
+
         # Attention Map: [B, HW, HW]
         # 注意显存：如果 H,W 很大(Layer1)，这里会比较吃显存。BS=32时注意。
         energy = torch.bmm(proj_query, proj_key)
         attention = self.softmax(energy)
-        
+
         # V: [B, C, HW]
         proj_value = self.value_conv(z_p).view(batch_size, C, -1)
-        
+
         # Out: [B, C, HW] -> [B, C, H, W]
         out = torch.bmm(proj_value, attention.permute(0, 2, 1))
         out = out.view(batch_size, C, H, W)
-        
+
         # Residual Connection
         out = self.gamma * out + x_main
         return out
@@ -169,20 +169,20 @@ class CrossAttentionFusion(nn.Module):
 # ==============================================================================
 
 class GatedSegDepthDecoder(nn.Module):
-    def __init__(self, main_in_channels: int, z_p_channels: int, out_channels: int, 
+    def __init__(self, main_in_channels: int, z_p_channels: int, out_channels: int,
                  low_level_in_channels: int = 256,
                  scale_cap: float = 1.0,
                  use_sigmoid=False):
         super().__init__()
         self.output_channels = out_channels
-        
+
         # 1. 高层特征处理 (ASPP)
         aspp_out = 256
         self.aspp = ASPP(in_channels=main_in_channels, out_channels=aspp_out, atrous_rates=[12, 24, 36])
 
         # 2. High-Level Attention: 在语义层注入风格
         self.high_level_attention = CrossAttentionFusion(
-            main_channels=aspp_out, 
+            main_channels=aspp_out,
             style_channels=z_p_channels
         )
 
@@ -223,7 +223,7 @@ class GatedSegDepthDecoder(nn.Module):
         # 2. Low Level (Skip Connection)
         if low_level_feat is not None:
             low = self.project_low_level(low_level_feat)
-            
+
             if use_film:
                 # 在细节层也进行 Cross-Attention
                 low = self.low_level_attention(low, z_p_feat)
@@ -231,10 +231,10 @@ class GatedSegDepthDecoder(nn.Module):
             # 上采样 High Level 并与 Low Level 拼接
             x = F.interpolate(x, size=low.shape[-2:], mode='bilinear', align_corners=True)
             x = torch.cat([x, low], dim=1)
-        
+
         # 3. 输出
         out = self.head(x)
-        
+
         # 上采样回原图
         scale_factor = 4 if (low_level_feat is not None) else 8
         out = F.interpolate(out, scale_factor=scale_factor, mode='bilinear', align_corners=True)
@@ -253,13 +253,13 @@ class CausalMTLModel(nn.Module):
         super().__init__()
         self.config = model_config
         self.data_config = data_config
-        
+
         # --- Encoder ---
         encoder_name = model_config['encoder_name']
         if 'resnet' in encoder_name:
             # 使用 dilated ResNet
             self.encoder = ResNetEncoder(name=encoder_name, pretrained=model_config['pretrained'], dilated=True)
-            
+
             # 将 ResNet 所有层投影到统一维度 (1024)
             target_dim = 1024
             self.resnet_adapters = nn.ModuleList([
@@ -275,7 +275,7 @@ class CausalMTLModel(nn.Module):
 
         self.latent_dim_s = model_config['latent_dim_s']
         self.latent_dim_p = model_config['latent_dim_p']
-        
+
         # ResNet 4层特征拼接作为主特征: 1024 * 4 = 4096
         combined_feature_dim = encoder_feature_dim * 4
 
@@ -308,7 +308,7 @@ class CausalMTLModel(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(PROJ_CHANNELS, PROJ_CHANNELS, 1)
         )
-        
+
         # 融合门控 (可学习)
         self.fusion_gate_depth = nn.Parameter(torch.tensor(0.0))
         self.fusion_gate_normal = nn.Parameter(torch.tensor(0.0))
@@ -325,10 +325,10 @@ class CausalMTLModel(nn.Module):
 
         # --- Decoders (使用 CrossAttentionFusion) ---
         decoder_main_dim = PROJ_CHANNELS * 2
-        
+
         self.predictor_seg = GatedSegDepthDecoder(
             main_in_channels=decoder_main_dim,
-            z_p_channels=PROJ_CHANNELS, 
+            z_p_channels=PROJ_CHANNELS,
             out_channels=num_seg_classes
         )
         self.predictor_depth = GatedSegDepthDecoder(
@@ -372,13 +372,13 @@ class CausalMTLModel(nn.Module):
         h = last_feat.mean(dim=[2, 3])
         return combined_feat, h, features, raw_features
 
-    def forward(self, x, stage: int = 2, 
+    def forward(self, x, stage: int = 2,
                 override_zs_map=None, override_zp_seg_map=None, override_zp_depth_map=None):
-        
+
         # 1. 特征提取
         # raw_features[0] 是 Layer 1 (stride 4)，用于 Low-Level Cross Attention
         combined_feat, h, features, raw_features = self.extract_features(x)
-        low_level_feat = raw_features[0] 
+        low_level_feat = raw_features[0]
         H_map, W_map = combined_feat.shape[2], combined_feat.shape[3]
         grid_size = 4
 
@@ -424,18 +424,18 @@ class CausalMTLModel(nn.Module):
         # ======================================================================
         # [Step 4] 跨任务风格注入 (Cross-Task Style Injection)
         # ======================================================================
-        
+
         # 1. 计算 Seg 带来的增益
         feat_seg_for_depth = self.cross_seg_to_depth(zp_seg_proj)
         feat_seg_for_normal = self.cross_seg_to_normal(zp_seg_proj)
 
         # 2. 融合 (Fusion)
         # Seg 不变
-        zp_seg_fused = zp_seg_proj 
+        zp_seg_fused = zp_seg_proj
         # Depth 和 Normal 接收 Seg 的信息
         zp_depth_fused = zp_depth_proj + torch.sigmoid(self.fusion_gate_depth) * feat_seg_for_depth
         zp_normal_fused = zp_normal_proj + torch.sigmoid(self.fusion_gate_normal) * feat_seg_for_normal
-        
+
         # Decoder 主输入：结合了多层 ResNet 特征的 f_proj 和 几何 z_s
         task_input_feat = torch.cat([f_proj, zs_proj], dim=1)
 
@@ -449,12 +449,12 @@ class CausalMTLModel(nn.Module):
 
         # === Task 1: Segmentation ===
         if self.training and task_input_feat.requires_grad:
-            pred_seg_main = checkpoint(run_decoder, self.predictor_seg, 
-                                     task_input_feat, 
+            pred_seg_main = checkpoint(run_decoder, self.predictor_seg,
+                                     task_input_feat,
                                      zp_seg_fused,  # 使用融合后的风格
                                      low_level_feat, use_film, False, use_reentrant=False)
         else:
-            pred_seg_main = self.predictor_seg(task_input_feat, zp_seg_fused, 
+            pred_seg_main = self.predictor_seg(task_input_feat, zp_seg_fused,
                                              low_level_feat=low_level_feat, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:
@@ -466,12 +466,12 @@ class CausalMTLModel(nn.Module):
 
         # === Task 2: Depth ===
         if self.training and task_input_feat.requires_grad:
-            pred_depth_main = checkpoint(run_decoder, self.predictor_depth, 
-                                       task_input_feat, 
+            pred_depth_main = checkpoint(run_decoder, self.predictor_depth,
+                                       task_input_feat,
                                        zp_depth_fused, # 使用融合后的风格
                                        low_level_feat, use_film, False, use_reentrant=False)
         else:
-            pred_depth_main = self.predictor_depth(task_input_feat, zp_depth_fused, 
+            pred_depth_main = self.predictor_depth(task_input_feat, zp_depth_fused,
                                                  low_level_feat=low_level_feat, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:
@@ -483,12 +483,12 @@ class CausalMTLModel(nn.Module):
 
         # === Task 3: Normal ===
         if self.training and task_input_feat.requires_grad:
-            pred_normal_main = checkpoint(run_decoder, self.predictor_normal, 
-                                        task_input_feat, 
+            pred_normal_main = checkpoint(run_decoder, self.predictor_normal,
+                                        task_input_feat,
                                         zp_normal_fused, # 使用融合后的风格
                                         low_level_feat, use_film, False, use_reentrant=False)
         else:
-            pred_normal_main = self.predictor_normal(task_input_feat, zp_normal_fused, 
+            pred_normal_main = self.predictor_normal(task_input_feat, zp_normal_fused,
                                                    low_level_feat=low_level_feat, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:

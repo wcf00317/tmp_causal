@@ -13,7 +13,7 @@ from data_utils.cityscapes_dataset import CityscapesDataset
 
 # --- 模型与Loss导入 ---
 from models.causal_model import CausalMTLModel
-from losses.composite_loss import AdaptiveCompositeLoss
+from losses.composite_loss import CompositeLoss,AdaptiveCompositeLoss
 from losses.mtl_loss import MTLLoss
 from models.baselines import RawMTLModel, SingleTaskModel
 from losses.single_task_loss import SingleTaskLoss
@@ -163,7 +163,8 @@ def main(config_path):
             {'params': head_params, 'lr': base_lr }  # Head LR 通常大一些 (可选，或者保持一致)
         ], lr=base_lr, weight_decay=config['training']['weight_decay'])
 
-        criterion = AdaptiveCompositeLoss(config['losses'].copy(), dataset_type).to(device)
+        #criterion = AdaptiveCompositeLoss(config['losses'].copy(), dataset_type).to(device)
+        criterion = CompositeLoss(config['losses'].copy(), dataset_type).to(device)
 
     logging.info(f"🔧 Optimizer: {config['training']['optimizer']}, LR: {base_lr}")
 

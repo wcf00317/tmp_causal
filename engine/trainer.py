@@ -190,9 +190,13 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
         crit_out = criterion(outputs, batch)
         if isinstance(crit_out, (tuple, list)):
             total_loss, loss_dict = crit_out[0], crit_out[1]
+            if i == len(pbar) - 1:
+                logging.info(f"Epoch {epoch + 1} [Training] loss: {loss_dict}")
         elif isinstance(crit_out, dict):
             loss_dict = crit_out
             total_loss = loss_dict.get('total_loss')
+            if i == len(pbar) - 1:
+                logging.info(f"Epoch {epoch + 1} [Training] loss: {loss_dict}")
             if total_loss is None:
                 raise ValueError("criterion returned dict but no 'total_loss' key found.")
         else:

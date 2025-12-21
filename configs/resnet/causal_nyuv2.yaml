@@ -1,6 +1,6 @@
 data:
   type: "nyuv2"
-  dataset_path: "/mnt/bn/rai/zout/tmp_causal/mtl_dataset/nyuv2"
+  dataset_path: "../mtl_dataset/nyuv2"
   batch_size: 32   # 如果显存允许，尽量开大
   num_workers: 4
   img_size: [288, 384]
@@ -10,7 +10,7 @@ model:
   encoder_name: "resnet50"
   pretrained: True
   latent_dim_s: 1024
-  latent_dim_p: 64
+  latent_dim_p: 2048
   z_s_bottleneck_noise: 0.1 # 稍微加点噪声防止过拟合
   
   # 关键：开启分解头，利用你的 decomposition loss 辅助 z_p 学习
@@ -41,26 +41,23 @@ training:
 
 losses:
   # === 核心任务 (高压策略) ===
-  lambda_seg: 10.0
-  lambda_depth: 20.0   # [重点] 压低 RMSE
-  lambda_normal: 10.0  # [重点] 优化角度误差
+  lambda_seg: 80.0
+  lambda_depth: 10.0   # [重点] 压低 RMSE
+  lambda_normal: 25.0  # [重点] 优化角度误差
   lambda_scene: 0.0
-  lambda_depth_zp: 1.0
+  lambda_depth_zp: 0.0
 
   # === 解耦 ===
-  lambda_independence: 1.0 # [重点] 10.0比1.0效果好
+  lambda_independence: 0.0 # [重点] 10.0比1.0效果好
 
   # === 重构 (辅助) ===
   # 既然开启了 decomposition，可以适当降低纯像素重构的权重，依赖物理重构
-  alpha_recon_geom: 2.0
-  beta_recon_app: 2.0
-  lambda_l1_recon: 1.0
+  alpha_recon_geom: 0.0
+  beta_recon_app: 0.0
+  lambda_l1_recon: 0.0
 
-  # === 分解正则 (利用你代码里的 Albedo/Shading) ===
-  lambda_img: 2.0        # I_hat = A*S，这个权重要高，保证 z_p 学到真正的 Albedo
-  lambda_alb_tv: 0.1    # 平滑 Albedo
-  lambda_sh_gray: 0.1    # 白光假设
-  lambda_xcov: 0.5      # 抑制 Albedo 和 Normal 的相关性 (另一种解耦)
-
-  # === 边缘一致性 ===
-  lambda_edge_consistency: 1.0 # 强化边缘
+  lambda_img: 0.0
+  lambda_alb_tv: 0.0 #1
+  lambda_sh_gray: 0.0 #1
+  lambda_xcov: 0.0
+  lambda_norm: 0.0 #1
