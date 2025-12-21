@@ -216,7 +216,7 @@ class AdaptiveCompositeLoss(nn.Module):
     """
     def __init__(self, loss_weights,dataset):
         super().__init__()
-        self.weights = loss_weights
+        self.weights = loss_weights.copy()
 
         # ==== 基础项 ====
         self.seg_loss = nn.CrossEntropyLoss(ignore_index=-1)
@@ -262,6 +262,9 @@ class AdaptiveCompositeLoss(nn.Module):
 
         # ★ 新增：正则项常数偏移 C = -log_var_min (=4.0)，确保 0.5*(log_var + C) ≥ 0
         self._regularizer_shift = -self._logvar_min
+    def update_weight(self, key, value):
+        if key in self.weights:
+            self.weights[key] = value
 
     def _uw(self, name: str, loss_scalar: torch.Tensor) -> torch.Tensor:
         """
@@ -280,6 +283,8 @@ class AdaptiveCompositeLoss(nn.Module):
 
     def forward(self, outputs, targets):
         loss_dict = {}
+        if torch.rand(1) < 0.001: 
+            print(f"Checking Internal Lambda: {self.weights.get('lambda_independence')}")
         # ===== 1) 主任务 =====
         stage = int(outputs.get('stage'))
         _dev = outputs['pred_seg'].device

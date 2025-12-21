@@ -1,6 +1,6 @@
 data:
   type: "nyuv2"
-  dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
+  dataset_path: "/mnt/bn/rai/zout/tmp_causal/mtl_dataset/nyuv2"
   batch_size: 32   # 如果显存允许，尽量开大
   num_workers: 4
   img_size: [288, 384]
@@ -30,9 +30,9 @@ training:
   weight_decay: 0.0001   # 增加一点 decay 防止过拟合
   
   # === 时间表控制 ===
-  stage0_epochs: 1     # 仅训练分解 (A*S=I)
-  stage1_epochs: 1    # 强力预热 z_s (20% 时间)
-  ind_warmup_epochs: 2 # CKA 慢慢介入
+  stage0_epochs: 2     # 仅训练分解 (A*S=I)
+  stage1_epochs: 0    # 强力预热 z_s (20% 时间)
+  ind_warmup_epochs: 10 # CKA 慢慢介入
 
   lr_scheduler:
     type: "cosine"
@@ -48,7 +48,7 @@ losses:
   lambda_depth_zp: 1.0
 
   # === 解耦 ===
-  lambda_independence: 10.0 # [重点] 10.0比1.0效果好
+  lambda_independence: 1.0 # [重点] 10.0比1.0效果好
 
   # === 重构 (辅助) ===
   # 既然开启了 decomposition，可以适当降低纯像素重构的权重，依赖物理重构

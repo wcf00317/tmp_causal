@@ -125,49 +125,165 @@ class ZpDepthRefiner(nn.Module):
     def forward(self, zp_proj):
         return self.alpha * self.net(zp_proj)
 
-
 class GatedSegDepthDecoder(nn.Module):
-    def __init__(self, main_in_channels: int, z_p_channels: int, out_channels: int, scale_cap: float = 1.0,
+    def __init__(self, main_in_channels: int, z_p_channels: int, out_channels: int, 
+                 low_level_in_channels: int = 256, # ResNet Layer1 输出
+                 scale_cap: float = 1.0,
                  use_sigmoid=False):
         super().__init__()
-        self.output_channels = out_channels
-        self.use_sigmoid = use_sigmoid
 
-        # [1] ASPP 放在最前面，负责降维和提取上下文
-        # 无论输入 main_in_channels 是多少 (1024/3072)，ASPP 都把它压到 256
+        self.output_channels = out_channels
+        
+        # [1] 高层特征处理 (保持不变)
         aspp_out = 256
         self.aspp = ASPP(in_channels=main_in_channels, out_channels=aspp_out, atrous_rates=[12, 24, 36])
 
-        # [2] 核心融合层 (Gated FiLM)
-        self.film_fusion = GatedFiLM(aspp_out, z_p_channels, scale_cap)
+        # ======================================================================
+        # [Strategy 3 核心修改]：双路 Attention
+        # ======================================================================
+        
+        # 第一路 Attention：处理高层语义 (1/16 尺度)
+        # 作用：决定“这是什么物体” (Semantic Context)
+        self.high_level_attention = CrossAttentionFusion(
+            main_channels=aspp_out, 
+            style_channels=z_p_channels  # 如果用了 Style Bank，这里要是 256*3=768
+        )
 
-        # [3] 最终预测头 (轻量化)
-        # 包含 3x3 卷积整理特征 -> GN -> ReLU -> 1x1 输出
+        # Skip Connection 投影层 (保持不变)
+        self.low_level_proj_channels = 48
+        self.project_low_level = nn.Sequential(
+            nn.Conv2d(low_level_in_channels, self.low_level_proj_channels, 1, bias=False),
+            nn.GroupNorm(4, self.low_level_proj_channels),
+            nn.ReLU(inplace=True)
+        )
+
+        # 第二路 Attention：处理低层细节 (1/4 尺度)
+        # 作用：决定“边界在哪里”、“纹理是什么” (Texture/Edge Details)
+        # 注意：这里的主特征是投影后的 low_level (48通道)
+        self.low_level_attention = CrossAttentionFusion(
+            main_channels=self.low_level_proj_channels, # 48
+            style_channels=z_p_channels,                # 仍然查询同一个风格库
+            inter_channels=32                           # 内部投影维度小一点，省显存
+        )
+
+        # ======================================================================
+
+        # [4] 最终预测头
+        head_in_channels = aspp_out + self.low_level_proj_channels
         self.head = nn.Sequential(
-            nn.Conv2d(aspp_out, 256, 3, padding=1, bias=False),
-            nn.GroupNorm(32, 256),  # [关键] 使用 GroupNorm 防止 BS=2 崩溃
+            nn.Conv2d(head_in_channels, 256, 3, padding=1, bias=False),
+            nn.GroupNorm(32, 256),
             nn.ReLU(inplace=True),
             nn.Conv2d(256, out_channels, 1)
         )
+        self.use_sigmoid = use_sigmoid
 
-    def forward(self, main_feat, z_p_feat, use_film: bool = True, detach_zp: bool = False):
-        # 1. 提取特征 (H/8)
+    def forward(self, main_feat, z_p_feat, low_level_feat=None, use_film: bool = True, detach_zp: bool = False):
+        """
+        z_p_feat: 可以是单个 z_p，也可以是拼接后的 z_p_bank
+        """
+        # 1. 提取高层特征
         x = self.aspp(main_feat)
 
-        # 2. 因果干预 (融合 z_p)
         if use_film:
-            x = self.film_fusion(x, z_p_feat)
+            if detach_zp: z_p_feat = z_p_feat.detach()
+            
+            # [Step A] 高层融合：把风格注入到语义中
+            x = self.high_level_attention(x, z_p_feat)
 
-        # 3. 生成预测 (H/8)
+        # 2. 处理低层特征 (Skip Connection)
+        if low_level_feat is not None:
+            low = self.project_low_level(low_level_feat) # [B, 48, H/4, W/4]
+            
+            # [Step B] 低层融合：关键点！把风格注入到边缘细节中
+            # 这能让分割边界更贴合纹理变化，让法线细节更丰富
+            if use_film:
+                # 注意：z_p_feat 需要插值到和 low 一样的尺寸吗？
+                # CrossAttentionFusion 内部会自动处理尺寸不匹配，所以直接传即可
+                # 但为了效率，建议在这里不对 z_p 做操作，让 Attention 内部去 view/permute
+                low = self.low_level_attention(low, z_p_feat)
+
+            # 上采样高层特征并拼接
+            x = F.interpolate(x, size=low.shape[-2:], mode='bilinear', align_corners=True)
+            x = torch.cat([x, low], dim=1)
+        
+        # 3. 输出
         out = self.head(x)
-
-        # 4. 直接上采样回原图 (H) - 像 LibMTL 一样
-        # scale_factor=8 对应 ResNet OS=8
-        out = F.interpolate(out, scale_factor=8, mode='bilinear', align_corners=True)
+        scale_factor = 4 if (low_level_feat is not None) else 8
+        out = F.interpolate(out, scale_factor=scale_factor, mode='bilinear', align_corners=True)
 
         if self.use_sigmoid:
             out = torch.sigmoid(out)
 
+        return out
+    
+class CrossAttentionFusion(nn.Module):
+    """
+    基于 Cross-Attention 的特征融合模块。
+    用于替代 GatedFiLM，实现结构 (Structure) 对 风格 (Style) 的按需查询。
+    
+    Args:
+        main_channels (int): 主特征 (Structure/Query) 的通道数
+        style_channels (int): 风格特征 (Style/Key/Value) 的通道数
+        inter_channels (int, optional): 内部投影通道数。默认减半以节省显存。
+    """
+    def __init__(self, main_channels, style_channels, inter_channels=None):
+        super().__init__()
+        self.inter_channels = inter_channels if inter_channels else main_channels // 2
+
+        # Query: 来自结构特征 (z_s / main_feat)
+        # 作用：询问 "这个位置的形状需要什么纹理？"
+        self.query_conv = nn.Conv2d(main_channels, self.inter_channels, kernel_size=1)
+
+        # Key: 来自风格特征 (z_p)
+        # 作用：提供 "我这里有木纹/玻璃/金属..." 的索引
+        self.key_conv = nn.Conv2d(style_channels, self.inter_channels, kernel_size=1)
+
+        # Value: 来自风格特征 (z_p)
+        # 作用：提供实际的纹理特征内容
+        self.value_conv = nn.Conv2d(style_channels, main_channels, kernel_size=1)
+
+        # Learnable Scale: 初始为0，保证初始状态下只利用结构特征，避免训练震荡
+        self.gamma = nn.Parameter(torch.zeros(1))
+        
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x_main, z_p):
+        """
+        x_main: [B, C_main, H, W]  <- 结构特征 (Query)
+        z_p:    [B, C_style, H, W] <- 风格特征 (Key/Value)
+                (注意：z_p 即使是全图尺寸，如果是从 4x4 插值来的，Attention 也能自动处理)
+        """
+        batch_size, C, H, W = x_main.size()
+        
+        # 1. 生成 Query [B, HW, C_inter]
+        # permute 调整为 [Batch, Sequence_Length, Dim]
+        proj_query = self.query_conv(x_main).view(batch_size, self.inter_channels, -1)
+        proj_query = proj_query.permute(0, 2, 1) 
+
+        # 2. 生成 Key [B, C_inter, HW]
+        # 注意：这里假设 z_p 的 spatial size 和 x_main 可能不同，但如果是插值后的则相同。
+        # view(-1) 会拉平 H*W 维度
+        proj_key = self.key_conv(z_p).view(batch_size, self.inter_channels, -1)
+
+        # 3. 计算 Attention Map (Similarity) -> [B, HW_main, HW_style]
+        # 这一步计算了每个结构像素与每个风格像素的相关性
+        energy = torch.bmm(proj_query, proj_key)
+        attention = self.softmax(energy)
+
+        # 4. 生成 Value [B, C_main, HW_style]
+        proj_value = self.value_conv(z_p).view(batch_size, C, -1)
+
+        # 5. 加权融合 (Weighted Sum) -> [B, C_main, HW_main]
+        out = torch.bmm(proj_value, attention.permute(0, 2, 1))
+        
+        # 6. 还原形状
+        out = out.view(batch_size, C, H, W)
+
+        # 7. 残差连接 (Residual Connection)
+        # z_s 仍然是主导，z_p 作为补充细节加在上面
+        out = self.gamma * out + x_main
+        
         return out
 
 class SegDepthDecoder(nn.Module):
@@ -256,6 +372,7 @@ class CausalMTLModel(nn.Module):
         PROJ_CHANNELS = 256
         SHARED_DECODER_DIM = 256
         aspp_in_channels = PROJ_CHANNELS * 2
+        STYLE_BANK_CHANNELS = PROJ_CHANNELS * 3
         self.proj_f = nn.Conv2d(combined_feature_dim, PROJ_CHANNELS, kernel_size=1)
 
         self.proj_z_s = nn.Conv2d(self.latent_dim_s, PROJ_CHANNELS, kernel_size=1)
@@ -278,20 +395,20 @@ class CausalMTLModel(nn.Module):
         # [修改] 实例化解码器时，将 SHARED_DECODER_DIM 传进去
         self.predictor_seg = GatedSegDepthDecoder(
             main_in_channels=decoder_main_dim,  # <--- 动态传递
-            z_p_channels=PROJ_CHANNELS,
+            z_p_channels=STYLE_BANK_CHANNELS,
             out_channels=num_seg_classes,
             scale_cap=1.0
         )
         self.predictor_depth = GatedSegDepthDecoder(
             main_in_channels=decoder_main_dim,  # <--- 动态传递
-            z_p_channels=PROJ_CHANNELS,
+            z_p_channels=STYLE_BANK_CHANNELS,
             out_channels=1,
             scale_cap=1.0,
             use_sigmoid=False
         )
         self.predictor_normal = GatedSegDepthDecoder(
             main_in_channels=decoder_main_dim,  # <--- 动态传递
-            z_p_channels=PROJ_CHANNELS,
+            z_p_channels=STYLE_BANK_CHANNELS,
             out_channels=3,
             scale_cap=1.0
         )
@@ -343,7 +460,7 @@ class CausalMTLModel(nn.Module):
         last_feat = features[-1]
         h = last_feat.mean(dim=[2, 3])
 
-        return combined_feat, h, features
+        return combined_feat, h, features, raw_features
 
     def forward(
             self,
@@ -371,7 +488,9 @@ class CausalMTLModel(nn.Module):
         # z_p_depth = z_p_depth_map.mean(dim=[2, 3])
         # z_p_normal = z_p_normal_map.mean(dim=[2, 3])
 
-        combined_feat, h, features = self.extract_features(x)
+        combined_feat, h, features, raw_features = self.extract_features(x)
+
+        low_level_feat = raw_features[0]
 
         # 获取特征图的原始空间尺寸 [H, W] (例如 32x64)
         H_map, W_map = combined_feat.shape[2], combined_feat.shape[3]
@@ -453,6 +572,7 @@ class CausalMTLModel(nn.Module):
         # 阶段控制开关
         use_film = (stage >= 2)
         use_zp_residual = (stage >= 2)
+        zp_bank = torch.cat([zp_seg_proj, zp_depth_proj, zp_normal_proj], dim=1)
 
         # ---------- 3. 下游任务解码 (Tasks) ----------
 
@@ -461,17 +581,17 @@ class CausalMTLModel(nn.Module):
         task_input_feat = torch.cat([f_proj, zs_proj], dim=1)
 
         # 辅助函数：用于 checkpoint 的包装
-        def run_decoder(decoder_module, main, zp, film, detach):
-            return decoder_module(main, zp, film, detach)
+        def run_decoder(decoder_module, main, zp, low_level_feat, film, detach):
+            return decoder_module(main, zp, low_level_feat, film, detach)
 
         # === Task 1: Segmentation ===
         # [OPTIMIZATION] 使用 Checkpoint 节省显存 (仅在训练时)
         if self.training and task_input_feat.requires_grad:
             # 注意：这里传入的是 512 维的 task_input_feat
-            pred_seg_main = checkpoint(run_decoder, self.predictor_seg, task_input_feat, zp_seg_proj, use_film, False,
+            pred_seg_main = checkpoint(run_decoder, self.predictor_seg, task_input_feat, zp_bank, low_level_feat, use_film, False,
                                        use_reentrant=False)
         else:
-            pred_seg_main = self.predictor_seg(task_input_feat, zp_seg_proj, use_film=use_film, detach_zp=False)
+            pred_seg_main = self.predictor_seg(task_input_feat, zp_bank, low_level_feat=low_level_feat, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:
             seg_res = self.zp_seg_refiner(zp_seg_proj, out_size=pred_seg_main.shape[-2:])
@@ -481,10 +601,10 @@ class CausalMTLModel(nn.Module):
 
         # === Task 2: Depth ===
         if self.training and task_input_feat.requires_grad:
-            pred_depth_main = checkpoint(run_decoder, self.predictor_depth, task_input_feat, zp_depth_proj, use_film,
+            pred_depth_main = checkpoint(run_decoder, self.predictor_depth, task_input_feat, zp_bank, low_level_feat, use_film,
                                          False, use_reentrant=False)
         else:
-            pred_depth_main = self.predictor_depth(task_input_feat, zp_depth_proj, use_film=use_film, detach_zp=False)
+            pred_depth_main = self.predictor_depth(task_input_feat, zp_bank, low_level_feat=low_level_feat, use_film=use_film, detach_zp=False)
 
         if use_zp_residual:
             zp_residual = self.zp_depth_refiner(zp_depth_proj)
@@ -496,10 +616,10 @@ class CausalMTLModel(nn.Module):
 
         # === Task 3: Normal [NEW] ===
         if self.training and task_input_feat.requires_grad:
-            pred_normal_main = checkpoint(run_decoder, self.predictor_normal, task_input_feat, zp_normal_proj, use_film,
+            pred_normal_main = checkpoint(run_decoder, self.predictor_normal, task_input_feat, zp_bank, low_level_feat, use_film,
                                           False, use_reentrant=False)
         else:
-            pred_normal_main = self.predictor_normal(task_input_feat, zp_normal_proj, use_film=use_film,
+            pred_normal_main = self.predictor_normal(task_input_feat, zp_bank, low_level_feat=low_level_feat, use_film=use_film,
                                                      detach_zp=False)
 
         if use_zp_residual:

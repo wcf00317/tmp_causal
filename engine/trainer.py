@@ -220,7 +220,7 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, st
         # 记录 Loss (加个防止 NaN 的判断，虽在 FP32 下很难出现)
         loss_val = total_loss.item()
         if not np.isfinite(loss_val):
-            print(f"Warning: Non-finite loss {loss_val} at step {i}")
+            logging.info(f"Warning: Non-finite loss {loss_val} at step {i}")
 
         total_train_loss += float(loss_val)
         pbar.set_postfix(loss=f"{loss_val:.4f}")
@@ -297,6 +297,7 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
     # 构建调度器
     sched = _build_scheduler(optimizer, train_cfg)
     logging.info(f"[LR Scheduler] {sched['type']}; base_lr={base_lr}")
+    ORIGINAL_TARGET_LAMBDA = float(config['losses'].get('lambda_independence', 0.0))
 
     stage0_epochs = int(train_cfg.get('stage0_epochs', 0))
     for epoch in range(total_epochs):
@@ -310,57 +311,60 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
             _switch_stage_freeze(model, stage)
 
         if epoch == 0:
-            print(f"🔍 [DEBUG CONFIG] Epoch {epoch}")
-            print(f"   - Stage0 End: {stage0_epochs}")
-            print(f"   - Stage1 End: {stage1_epochs} (Expected: < {epoch} for Stage 2)")
-            print(f"   - Current Stage: {stage}")
-
-        raw_target = config['losses'].get('lambda_independence', "NOT_FOUND")
-        target_ind_lambda = float(config['losses'].get('lambda_independence', 0.0))
-
-        # 3. 打印 Warmup 配置
+            logging.info(f"🔍 [DEBUG CONFIG] Epoch {epoch}")
+            logging.info(f"   - Stage0 End: {stage0_epochs}")
+            logging.info(f"   - Stage1 End: {stage1_epochs} (Expected: < {epoch} for Stage 2)")
+            logging.info(f"   - Current Stage: {stage}")
+        
+        decay_start_epoch = 60   # 从第 60 个 Epoch 开始衰减
+        decay_end_epoch = 90     # 到第 90 个 Epoch 衰减完毕
+        min_lambda = 0.0         # 衰减到 0 的最小值   
+        target_ind_lambda = ORIGINAL_TARGET_LAMBDA
+        
         ind_warmup_epochs = int(train_cfg.get('ind_warmup_epochs', 0))
 
-        # 4. 计算逻辑 + 过程打印
+        # 4. 计算当前 Epoch 的 Lambda (逻辑合并，只保留一份)
         current_ind_lambda = target_ind_lambda
+        
         if stage < 2:
-            print(f"   - [Status] In Stage {stage} (Frozen/Warmup), Forcing Lambda to 0.0")
+            logging.info(f"   - [Status] In Stage {stage} (Frozen/Warmup), Forcing Lambda to 0.0")
             current_ind_lambda = 0.0
-        elif ind_warmup_epochs > 0:
-            progress = epoch - stage1_epochs
-            ratio = min(1.0, max(0.0, progress / float(ind_warmup_epochs)))
-            current_ind_lambda = target_ind_lambda * ratio
-            print(f"   - [Status] In Stage 2. Progress: {progress}/{ind_warmup_epochs}, Ratio: {ratio:.4f}")
-            print(f"   - [Calc] {target_ind_lambda} * {ratio:.4f} = {current_ind_lambda}")
-        else:
-            print(f"   - [Status] In Stage 2 (No Warmup). Using Full Target.")
+        elif epoch >= decay_start_epoch:
+            # 计算衰减进度 (0.0 -> 1.0)
+            decay_progress = (epoch - decay_start_epoch) / float(max(1, decay_end_epoch - decay_start_epoch))
+            decay_progress = min(1.0, max(0.0, decay_progress))
             
-        print(f"🔍 DEBUG: Keys in config['losses']: {list(config['losses'].keys())}")
-        target_ind_lambda = float(config['losses'].get('lambda_independence'))
-        ind_warmup_epochs = int(train_cfg.get('ind_warmup_epochs', 0))
-
-        current_ind_lambda = target_ind_lambda
-        if stage < 2:
-            # Stage 0/1 强制为 0 (虽然 Loss 内部也有判断，但这里显式控制更安全)
-            current_ind_lambda = 0.0
+            # 线性衰减公式: Start + (End - Start) * Progress
+            # 即: 1.0 -> 0.0
+            current_ind_lambda = target_ind_lambda - (target_ind_lambda - min_lambda) * decay_progress
+            
+            logging.info(f"   - [Strategy] 📉 Lambda Decay Active! Epoch {epoch}: {target_ind_lambda} -> {current_ind_lambda:.4f}")
         elif ind_warmup_epochs > 0:
             # Stage 2：开始 Warmup
-            # 关键点：进度 = (当前Epoch - Stage2开始Epoch)
             progress = epoch - stage1_epochs
-
-            # 限制比例在 0.0 到 1.0 之间
             ratio = min(1.0, max(0.0, progress / float(ind_warmup_epochs)))
+            
             current_ind_lambda = target_ind_lambda * ratio
+            
+            logging.info(f"   - [Status] In Stage 2. Progress: {progress}/{ind_warmup_epochs}, Ratio: {ratio:.4f}")
+            logging.info(f"   - [Calc] {target_ind_lambda} * {ratio:.4f} = {current_ind_lambda}")
+            
+        else:
+            # 无 Warmup 或 Warmup 已结束
+            logging.info(f"   - [Status] In Stage 2 (No Warmup). Using Full Target.")
+            current_ind_lambda = target_ind_lambda
+
+        # 5. 更新 Loss 权重
         real_criterion = criterion.module if hasattr(criterion, 'module') else criterion
 
-        # [FIX] 2. 强制更新并打印 Debug 信息
         if hasattr(real_criterion, 'weights'):
-            # 打印一下，确保真的改到了设置的预期
-            print(f"DEBUG Epoch {epoch}: Updating lambda_independence to {current_ind_lambda:.1f}")
+            logging.info(f"DEBUG Epoch {epoch}: Updating lambda_independence to {current_ind_lambda:.4f}")
+            # 这里修改了 weights，同时也修改了 config['losses'] (因为它们指向同一块内存)
+            # 但因为我们在开头用了 ORIGINAL_TARGET_LAMBDA，所以下一次循环不会受影响
             real_criterion.weights['lambda_independence'] = torch.tensor(current_ind_lambda, device=device)
         else:
-            # 如果没找到 weights 属性，打印红色警告！
-            print(f"⚠️ WARNING: Could not find 'weights' in criterion at Epoch {epoch}! Lambda NOT updated!")
+            logging.info(f"⚠️ WARNING: Could not find 'weights' in criterion at Epoch {epoch}! Lambda NOT updated!")
+
         # ---- Warm-up (Cosine only) ----
         if sched["type"] == "cosine":
             warmup_epochs = sched["warmup_epochs"]
@@ -430,12 +434,12 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
                     )
                 logging.info(metrics_log)
 
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'best_score': best_relative_score,
-        }, is_best, checkpoint_dir=checkpoint_dir)
+        # save_checkpoint({
+        #     'epoch': epoch + 1,
+        #     'state_dict': model.state_dict(),
+        #     'optimizer': optimizer.state_dict(),
+        #     'best_score': best_relative_score,
+        # }, is_best, checkpoint_dir=checkpoint_dir)
 
     # =========================================================
     # [FINAL LOG] 训练结束时的详细总结 (已修复数据类型判断)
