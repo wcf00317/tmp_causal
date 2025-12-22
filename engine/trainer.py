@@ -438,12 +438,12 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
                     )
                 logging.info(metrics_log)
 
-        # save_checkpoint({
-        #     'epoch': epoch + 1,
-        #     'state_dict': model.state_dict(),
-        #     'optimizer': optimizer.state_dict(),
-        #     'best_score': best_relative_score,
-        # }, is_best, checkpoint_dir=checkpoint_dir)
+        save_checkpoint({
+            'epoch': epoch + 1,
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'best_score': best_relative_score,
+        }, is_best, checkpoint_dir=checkpoint_dir)
 
     # =========================================================
     # [FINAL LOG] 训练结束时的详细总结 (已修复数据类型判断)
@@ -473,10 +473,5 @@ def train(model, train_loader, val_loader, optimizer, criterion, scheduler, conf
         acc_30 = best_metrics_details.get('normal_acc_30', 0.0)
         logging.info(f"  - Normal:       Mean Ang={mean_ang:.2f}°, Median Ang={med_ang:.2f}°")
         logging.info(f"                  Acc@11.25°={acc_11:.4f}, Acc@22.5°={acc_22:.4f}, Acc@30°={acc_30:.4f}")
-
-    # 4. Scene (已废弃，注释掉)
-    # scene_acc = best_metrics_details.get('scene_acc', 1.0)
-    # if scene_acc != 1.0:
-    #     logging.info(f"  - Scene Classification (Acc): {scene_acc:.4f}")
 
     logging.info("=" * 60 + "\n")

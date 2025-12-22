@@ -1,63 +1,86 @@
 data:
   type: "nyuv2"
-  # 确保路径正确
-  dataset_path: "/data/chengfengwu/alrl/mtl_dataset/nyuv2"
-  # 诊断时 Batch Size 可以小一点，或者保持 8
-  batch_size: 2
+  dataset_path: "../mtl_dataset/nyuv2"
+  batch_size: 32   # 如果显存允许，尽量开大
   num_workers: 4
-  img_size: [288, 384] # 保持和 SOTA 一致的分辨率
-  pin_memory: true
+  img_size: [288, 384]
 
 model:
-  type: "causal"         # 借用 Causal 架构来测 ResNet50
+  type: "causal"
   encoder_name: "resnet50"
-  pretrained: true
-  latent_dim_s: 128
-  latent_dim_p: 256
-  # NYUv2 参数占位
-  num_seg_classes: 40
-  num_scene_classes: 27
+  pretrained: True
+  latent_dim_s: 1024
+  latent_dim_p: 2048
+  z_s_bottleneck_noise: 0.1 # 稍微加点噪声防止过拟合
 
+  # 关键：开启分解头，利用你的 decomposition loss 辅助 z_p 学习
   decomposition:
     enabled: true
+    normal_head_hidden: 128
+    albedo_head_hidden: 128
     light_head:
       sh_degree: 2
+      grayscale_prior: true
 
 training:
-  seed: 2025
-  epochs: 100            # 跑久一点看极限
-  optimizer: "AdamW"
-  learning_rate: 0.0005  # 稍微调大 LR 激进一点
-  weight_decay: 0.0      # 【关键】关掉正则，我们要看模型能不能“记住”数据
+  seed: 2024           # 固定种子
+  epochs: 100          # 冲击 SOTA 建议 200
+  optimizer: "AdamW"   # AdamW 比 Adam 泛化性更好
+  learning_rate: 0.0002
+  weight_decay: 0.0001   # 增加一点 decay 防止过拟合
 
-  # 【关键】跳过所有预热，直接全参数训练
-  stage0_epochs: 0
-  stage1_epochs: 0
-  ind_warmup_epochs: 0
+  # === 时间表控制 ===
+  stage0_epochs: 2     # 仅训练分解 (A*S=I)
+  stage1_epochs: 0    # 强力预热 z_s (20% 时间)
+  ind_warmup_epochs: 10 # CKA 慢慢介入
 
   lr_scheduler:
-    type: "step"
-    step_size: 50
-    gamma: 0.5
+    type: "cosine"
+    warmup_epochs: 5
+    min_lr_factor: 0.01
 
 losses:
-  # === 关闭所有其他任务 ===
-  lambda_seg: 0.0
-  lambda_normal: 0.0
+  # === 核心任务 (高压策略) ===
+  lambda_seg: 10.0
+  lambda_depth: 15.0   # [重点] 压低 RMSE
+  lambda_normal: 25.0  # [重点] 优化角度误差
   lambda_scene: 0.0
+  lambda_depth_zp: 0.1
 
-  # === 深度权重 ===
-  # NYUv2 用的是 ScaleInvariantLoss，数值通常在 0.1~0.5 之间
-  # 不需要设像 Cityscapes (L1) 那么大，设 10.0 足够观测了
-  lambda_depth: 10.0
+  # === 解耦 ===
+  lambda_independence: 1.0 # [重点] 10.0比1.0效果好
 
-  # 关闭解耦和重构，只测 "Input -> Depth" 的拟合能力
-  lambda_independence: 0.0
-  alpha_recon_geom: 0.0
-  beta_recon_app: 0.0
-  lambda_l1_recon: 0.0
 
-  # 关闭正则
-  lambda_edge_consistency: 0.0
-  lambda_img: 0.0
-  lambda_sh_gray: 0.0
+  alpha_recon_geom: 2.0  # [MISSING] 补全
+  beta_recon_app: 2.0    # [MISSING] 补全
+  lambda_l1_recon: 1.0
+
+    # === 重构 (辅助) ===
+  alpha_recon_geom_aux: 0.1
+  beta_recon_app_aux: 0.5
+
+    # === 分解与物理约束 ===
+
+    # === 边缘一致性 [关键补全] ===
+    # 1. 几何重建的边缘 Loss (Class版)
+  lambda_edge_consistency: 1.0
+
+    # 2. 预测深度的边缘 Loss (Class版, 针对主任务)
+  lambda_edge_consistency_pred: 2.0
+
+    # 3. [MISSING] 旧版函数式几何边缘权重
+    # 既然开启了上面的 lambda_edge_consistency，这个旧版设为 0.0 避免双重惩罚
+  alpha_recon_geom_edges: 0.0
+
+    # 4. [MISSING] 几何指导分割边缘权重
+    # 这是一个 SOTA 提分点！利用无监督的几何边界来锐化分割
+    # 建议设为 0.5，让几何边缘辅助分割
+  beta_seg_edge_from_geom: 0.5
+
+
+  lambda_img: 2.0
+  lambda_alb_tv: 0.1 #1
+  lambda_sh_gray: 0.1 #1
+  lambda_alb_chroma: 0.1
+  lambda_xcov: 0.5
+  lambda_norm: 1.0 #1

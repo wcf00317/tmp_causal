@@ -248,10 +248,12 @@ class CompositeLoss(nn.Module):
         else:
             # Segmentation
             l_seg = self.seg_loss(outputs['pred_seg'], targets['segmentation'])
-            loss_seg = self.weights.get('lambda_seg', 1.0) * l_seg
+            # [STRICT] 必须显式配置 lambda_seg，否则报错
+            loss_seg = self.weights['lambda_seg'] * l_seg
 
             # Depth
-            if self.weights.get('lambda_depth', 0.0) > 0:
+            # [STRICT] 必须显式配置 lambda_depth，即使是 0.0 也要写
+            if self.weights['lambda_depth'] > 0:
                 # [MODIFIED] 手动实现带 Mask 的 L1 Loss (对齐 LibMTL)
                 pred_d = outputs['pred_depth']
                 gt_d = targets['depth']
@@ -264,23 +266,23 @@ class CompositeLoss(nn.Module):
                     l_depth = diff.sum() / num_valid
                 else:
                     l_depth = torch.tensor(0.0, device=pred_d.device)
-                loss_depth = self.weights.get('lambda_depth', 1.0) * l_depth
+                loss_depth = self.weights['lambda_depth'] * l_depth
             else:
                 l_depth = torch.tensor(0.0, device=l_seg.device)
                 loss_depth = torch.tensor(0.0, device=l_seg.device)
 
             # Scene
-            if self.weights.get('lambda_scene', 0.0) > 0:
+            if self.weights['lambda_scene'] > 0:
                 l_scene = self.scene_loss(outputs['pred_scene'], targets['scene_type'])
-                loss_scene = self.weights.get('lambda_scene', 1.0) * l_scene
+                loss_scene = self.weights['lambda_scene'] * l_scene
             else:
                 l_scene = torch.tensor(0.0, device=l_seg.device)
                 loss_scene = torch.tensor(0.0, device=l_seg.device)
 
             # Normal
-            if 'normals' in outputs and 'normal' in targets and self.weights.get('lambda_normal', 0.0) > 0:
+            if 'normals' in outputs and 'normal' in targets and self.weights['lambda_normal'] > 0:
                 l_normal = self.normal_loss(outputs['normals'], targets['normal'])
-                loss_normal = self.weights.get('lambda_normal', 1.0) * l_normal
+                loss_normal = self.weights['lambda_normal'] * l_normal
             else:
                 l_normal = torch.tensor(0.0, device=l_seg.device)
                 loss_normal = torch.tensor(0.0, device=l_seg.device)
@@ -304,12 +306,12 @@ class CompositeLoss(nn.Module):
         z_s_centered = z_s - z_s.mean(dim=0, keepdim=True)
         cka_seg = self.independence_loss(z_s_centered, z_p_seg - z_p_seg.mean(0, keepdim=True))
 
-        if self.weights.get('lambda_depth', 0.0) > 0:
+        if self.weights['lambda_depth'] > 0:
             cka_depth = self.independence_loss(z_s_centered, z_p_depth - z_p_depth.mean(0, keepdim=True))
         else:
             cka_depth = torch.tensor(0.0, device=_dev)
 
-        if 'z_p_normal' in outputs and self.weights.get('lambda_normal', 0.0) > 0:
+        if 'z_p_normal' in outputs and self.weights['lambda_normal'] > 0:
             z_p_normal = outputs['z_p_normal']
             cka_normal = self.independence_loss(z_s_centered, z_p_normal - z_p_normal.mean(0, keepdim=True))
         else:
@@ -324,21 +326,22 @@ class CompositeLoss(nn.Module):
         if stage <= 1:
             loss_ind = torch.zeros_like(l_ind)
         else:
-            loss_ind = self.weights.get('lambda_independence', 0.05) * l_ind
+            # [STRICT] 必须显式配置 lambda_independence
+            loss_ind = self.weights['lambda_independence'] * l_ind
 
         # ===== 3) 重建（主） =====
-        if self.weights.get('alpha_recon_geom', 0.0) > 0:
+        if self.weights['alpha_recon_geom'] > 0:
             l_recon_g = self.recon_geom_loss(outputs['recon_geom'], targets['depth'])
-            loss_recon_g = self.weights.get('alpha_recon_geom', 1.0) * l_recon_g
+            loss_recon_g = self.weights['alpha_recon_geom'] * l_recon_g
         else:
             l_recon_g = torch.tensor(0.0, device=z_s.device)
             loss_recon_g = torch.tensor(0.0, device=z_s.device)
 
         l_recon_a_lpips = self.recon_app_loss_lpips(outputs['recon_app'], targets['appearance_target'])
         l_recon_a_l1 = self.recon_app_loss_l1(outputs['recon_app'], targets['appearance_target'])
-        l_recon_a = l_recon_a_lpips + self.weights.get('lambda_l1_recon', 1.0) * l_recon_a_l1
+        l_recon_a = l_recon_a_lpips + self.weights['lambda_l1_recon'] * l_recon_a_l1
 
-        loss_recon_a = self.weights.get('beta_recon_app', 1.0) * l_recon_a
+        loss_recon_a = self.weights['beta_recon_app'] * l_recon_a
 
         loss_dict.update({
             'recon_geom_loss': l_recon_g,
@@ -395,7 +398,7 @@ class CompositeLoss(nn.Module):
         l_recon_g_aux = self.recon_geom_loss(recon_geom_aux, target_depth_aux)
         l_recon_a_lpips_aux = self.recon_app_loss_lpips(recon_app_aux, target_app_aux)
         l_recon_a_l1_aux = self.recon_app_loss_l1(recon_app_aux, target_app_aux)
-        l_recon_a_aux = l_recon_a_lpips_aux + self.weights.get('lambda_l1_recon', 1.0) * l_recon_a_l1_aux
+        l_recon_a_aux = l_recon_a_lpips_aux + self.weights['lambda_l1_recon'] * l_recon_a_l1_aux
 
         loss_dict.update({
             'recon_geom_aux_loss': l_recon_g_aux,
@@ -403,20 +406,21 @@ class CompositeLoss(nn.Module):
         })
 
         # ===== 5) 一致性项 =====
-        if self.weights.get('lambda_depth_zp', 0.0) > 0:
+        if self.weights['lambda_depth_zp'] > 0:
             l_depth_from_zp = self.depth_loss(outputs['pred_depth_from_zp'], targets['depth'])
         else:
             l_depth_from_zp = torch.tensor(0.0, device=_dev)
 
-        if self.weights.get('lambda_edge_consistency', 0.0) > 0:
+        if self.weights['lambda_edge_consistency'] > 0:
             l_edge_geom = self.edge_consistency_loss(outputs['recon_geom'], targets['depth'])
         else:
             l_edge_geom = torch.tensor(0.0, device=_dev)
 
-        edge_w = self.weights.get('alpha_recon_geom_edges', 0.1)
-        seg_edge_w = self.weights.get('beta_seg_edge_from_geom', 0.1)
+        # [STRICT] 下面这三个权重也必须配置，否则报错
+        edge_w = self.weights['alpha_recon_geom_edges']
+        seg_edge_w = self.weights['beta_seg_edge_from_geom']
+        edge_pred_w = self.weights['lambda_edge_consistency_pred']
 
-        edge_pred_w = self.weights.get('lambda_edge_consistency_pred', self.weights.get('lambda_edge_consistency', 0.0))
         if edge_pred_w > 0:
             l_edge_pred = self.edge_consistency_loss(outputs['pred_depth'], targets['depth'])
         else:
@@ -431,21 +435,22 @@ class CompositeLoss(nn.Module):
         # ===== 6) 汇总 =====
         edge_scale = 0.0 if stage == 1 else 1.0
 
+        # [STRICT] 所有参与汇总的 lambda 必须在 weights 中存在
         total_loss = (
                 l_task + loss_ind + loss_recon_g + loss_recon_a +
-                self.weights.get('alpha_recon_geom_aux', 0.0) * l_recon_g_aux +
-                self.weights.get('beta_recon_app_aux', 0.0) * l_recon_a_aux +
-                self.weights.get('lambda_depth_zp', 0.0) * l_depth_from_zp +
-                self.weights.get('lambda_edge_consistency', 0.0) * edge_scale * l_edge_geom +
+                self.weights['alpha_recon_geom_aux'] * l_recon_g_aux +
+                self.weights['beta_recon_app_aux'] * l_recon_a_aux +
+                self.weights['lambda_depth_zp'] * l_depth_from_zp +
+                self.weights['lambda_edge_consistency'] * edge_scale * l_edge_geom +
                 edge_consistency_loss(outputs['recon_geom'], targets['depth'], weight=edge_w) +
                 edge_scale * edge_pred_w * l_edge_pred +
                 edge_scale * seg_edge_consistency_loss(outputs['pred_seg'], outputs['recon_geom'], weight=seg_edge_w) +
-                self.weights.get('lambda_img', 0.0) * l_img +
-                self.weights.get('lambda_alb_tv', 0.0) * l_alb_tv +
-                self.weights.get('lambda_alb_chroma', 0.0) * l_alb_chroma +
-                self.weights.get('lambda_sh_gray', 0.0) * l_sh_gray +
-                self.weights.get('lambda_norm', 0.0) * l_norm +
-                self.weights.get('lambda_xcov', 0.0) * l_xcov
+                self.weights['lambda_img'] * l_img +
+                self.weights['lambda_alb_tv'] * l_alb_tv +
+                self.weights['lambda_alb_chroma'] * l_alb_chroma +
+                self.weights['lambda_sh_gray'] * l_sh_gray +
+                self.weights['lambda_norm'] * l_norm +
+                self.weights['lambda_xcov'] * l_xcov
         )
 
         loss_dict['total_loss'] = total_loss
@@ -642,7 +647,7 @@ class AdaptiveCompositeLoss(nn.Module):
             loss_recon_g = torch.tensor(0.0, device=z_s.device)
         l_recon_a_lpips = self.recon_app_loss_lpips(outputs['recon_app'], targets['appearance_target'])
         l_recon_a_l1 = self.recon_app_loss_l1(outputs['recon_app'], targets['appearance_target'])
-        l_recon_a = l_recon_a_lpips + self.weights.get('lambda_l1_recon', 1.0) * l_recon_a_l1
+        l_recon_a = l_recon_a_lpips + self.weights.get('lambda_l1_recon') * l_recon_a_l1
 
         loss_recon_a = self._uw('recon_app', l_recon_a)
 
@@ -655,10 +660,10 @@ class AdaptiveCompositeLoss(nn.Module):
             v.device for v in outputs.values() if torch.is_tensor(v))
 
         # ===== 3.1) 分解式重构（可选） =====
-        A = outputs.get('albedo', None)
-        S = outputs.get('shading', None)
-        Nn = outputs.get('normals', None)
-        I_hat = outputs.get('recon_decomp', None)
+        A = outputs.get('albedo')
+        S = outputs.get('shading')
+        Nn = outputs.get('normals')
+        I_hat = outputs.get('recon_decomp')
 
         l_img = torch.tensor(0.0, device=_dev)
         l_alb_tv = torch.tensor(0.0, device=_dev)

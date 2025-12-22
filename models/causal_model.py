@@ -207,6 +207,7 @@ class GatedSegDepthDecoder(nn.Module):
             nn.Conv2d(head_in_channels, 256, 3, padding=1, bias=False),
             nn.GroupNorm(32, 256),
             nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
             nn.Conv2d(256, out_channels, 1)
         )
         self.use_sigmoid = use_sigmoid
@@ -308,10 +309,17 @@ class CausalMTLModel(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(PROJ_CHANNELS, PROJ_CHANNELS, 1)
         )
+        self.cross_depth_to_normal = nn.Sequential(
+            nn.Conv2d(PROJ_CHANNELS, PROJ_CHANNELS, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(PROJ_CHANNELS, PROJ_CHANNELS, 1)  # 甚至可以用 3x3 卷积来模拟求导过程
+        )
+
 
         # 融合门控 (可学习)
         self.fusion_gate_depth = nn.Parameter(torch.tensor(0.0))
         self.fusion_gate_normal = nn.Parameter(torch.tensor(0.0))
+        self.fusion_gate_depth_to_normal = nn.Parameter(torch.tensor(0.0))
 
         # --- Residual Refiners (Refiner 使用原始风格) ---
         self.zp_depth_refiner = ZpDepthRefiner(c_in=PROJ_CHANNELS, alpha=0.1)
@@ -429,13 +437,17 @@ class CausalMTLModel(nn.Module):
         feat_seg_for_depth = self.cross_seg_to_depth(zp_seg_proj)
         feat_seg_for_normal = self.cross_seg_to_normal(zp_seg_proj)
 
+
         # 2. 融合 (Fusion)
         # Seg 不变
         zp_seg_fused = zp_seg_proj
         # Depth 和 Normal 接收 Seg 的信息
         zp_depth_fused = zp_depth_proj + torch.sigmoid(self.fusion_gate_depth) * feat_seg_for_depth
-        zp_normal_fused = zp_normal_proj + torch.sigmoid(self.fusion_gate_normal) * feat_seg_for_normal
-
+        #zp_normal_fused = zp_normal_proj + torch.sigmoid(self.fusion_gate_normal) * feat_seg_for_normal
+        feat_depth_for_normal = self.cross_depth_to_normal(zp_depth_fused)
+        zp_normal_fused = zp_normal_proj + \
+                          torch.sigmoid(self.fusion_gate_normal) * feat_seg_for_normal + \
+                          torch.sigmoid(self.fusion_gate_depth_to_normal) * feat_depth_for_normal
         # Decoder 主输入：结合了多层 ResNet 特征的 f_proj 和 几何 z_s
         task_input_feat = torch.cat([f_proj, zs_proj], dim=1)
 

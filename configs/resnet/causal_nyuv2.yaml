@@ -41,23 +41,23 @@ training:
 
 losses:
   # === 核心任务 (高压策略) ===
-  lambda_seg: 80.0
+  lambda_seg: 20.0
   lambda_depth: 10.0   # [重点] 压低 RMSE
-  lambda_normal: 25.0  # [重点] 优化角度误差
+  lambda_normal: 10.0  # [重点] 优化角度误差
   lambda_scene: 0.0
-  lambda_depth_zp: 0.0
+  lambda_depth_zp: 1.0
 
   # === 解耦 ===
-  lambda_independence: 0.0 # [重点] 10.0比1.0效果好
+  lambda_independence: 1.0 # [重点] 10.0比1.0效果好
 
   # === 重构 (辅助) ===
   # 既然开启了 decomposition，可以适当降低纯像素重构的权重，依赖物理重构
-  alpha_recon_geom: 0.0
-  beta_recon_app: 0.0
-  lambda_l1_recon: 0.0
+  alpha_recon_geom: 2.0
+  beta_recon_app: 2.0
+  lambda_l1_recon: 1.0
 
-  lambda_img: 0.0
-  lambda_alb_tv: 0.0 #1
-  lambda_sh_gray: 0.0 #1
-  lambda_xcov: 0.0
-  lambda_norm: 0.0 #1
+  lambda_img: 2.0
+  lambda_alb_tv: 0.1 #1
+  lambda_sh_gray: 0.1 #1
+  lambda_xcov: 0.5
+  lambda_norm: 1.0 #1

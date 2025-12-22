@@ -188,15 +188,15 @@ def main(config_path):
         run_all_experiments(model, val_loader, device)
 
     # # 8. 可视化 (可选)
-    # logging.info("\n----- Running Final Visualizations -----")
-    # best_ckpt = os.path.join(checkpoint_dir, 'model_best.pth.tar')
-    # if os.path.exists(best_ckpt):
-    #     checkpoint = torch.load(best_ckpt, map_location=device)
-    #     model.load_state_dict(checkpoint['state_dict'], strict=False)
-    #     generate_visual_reports(model, val_loader, device, save_dir=vis_dir, num_reports=3)
+    logging.info("\n----- Running Final Visualizations -----")
+    best_ckpt = os.path.join(checkpoint_dir, 'model_best.pth.tar')
+    if os.path.exists(best_ckpt):
+        checkpoint = torch.load(best_ckpt, map_location=device)
+        model.load_state_dict(checkpoint['state_dict'], strict=False)
+        generate_visual_reports(model, val_loader, device, save_dir=vis_dir, num_reports=3)
 
-    # if hasattr(train_dataset, "close"): train_dataset.close()
-    # if hasattr(val_dataset, "close"): val_dataset.close()
+    if hasattr(train_dataset, "close"): train_dataset.close()
+    if hasattr(val_dataset, "close"): val_dataset.close()
 
     logging.info("\n🎉 Done.")
 
